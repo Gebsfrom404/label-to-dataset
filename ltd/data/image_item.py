@@ -1,0 +1,51 @@
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Optional
+
+from ltd.data.label_data import Label
+
+
+@dataclass
+class ImageItem:
+    path: Path
+    width: int = 0
+    height: int = 0
+    labels: list[Label] = field(default_factory=list)
+    tags: list[str] = field(default_factory=list)
+    mask_path: Optional[Path] = None
+    modified_path: Optional[Path] = None
+    _thumbnail: object = field(default=None, repr=False)
+
+    @property
+    def name(self) -> str:
+        return self.path.stem
+
+    @property
+    def filename(self) -> str:
+        return self.path.name
+
+    @property
+    def suffix(self) -> str:
+        return self.path.suffix.lower()
+
+    @property
+    def display_path(self) -> Path:
+        """Return modified path if available, otherwise original."""
+        return self.modified_path if self.modified_path else self.path
+
+    @property
+    def caption_path(self) -> Path:
+        return self.path.with_suffix('.txt')
+
+    def load_tags_from_file(self):
+        """Load tags from the caption .txt file if it exists."""
+        if self.caption_path.exists():
+            text = self.caption_path.read_text(encoding='utf-8').strip()
+            if text:
+                self.tags = [t.strip() for t in text.split(',') if t.strip()]
+            else:
+                self.tags = []
+
+    def save_tags_to_file(self):
+        """Save tags to the caption .txt file."""
+        self.caption_path.write_text(', '.join(self.tags), encoding='utf-8')

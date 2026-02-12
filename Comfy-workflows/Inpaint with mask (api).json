@@ -1,0 +1,355 @@
+{
+  "4": {
+    "inputs": {
+      "shift": 3,
+      "model": [
+        "39",
+        0
+      ]
+    },
+    "class_type": "ModelSamplingAuraFlow",
+    "_meta": {
+      "title": "ModelSamplingAuraFlow"
+    }
+  },
+  "16": {
+    "inputs": {
+      "vae_name": "qwen_image_vae.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "Load VAE"
+    }
+  },
+  "17": {
+    "inputs": {
+      "width": [
+        "18",
+        0
+      ],
+      "height": [
+        "18",
+        1
+      ],
+      "batch_size": [
+        "18",
+        2
+      ],
+      "color": 0
+    },
+    "class_type": "EmptyImage",
+    "_meta": {
+      "title": "EmptyImage"
+    }
+  },
+  "18": {
+    "inputs": {
+      "image": [
+        "34",
+        1
+      ]
+    },
+    "class_type": "GetImageSize",
+    "_meta": {
+      "title": "Get Image Size"
+    }
+  },
+  "21": {
+    "inputs": {
+      "x": 0,
+      "y": 0,
+      "resize_source": false,
+      "destination": [
+        "17",
+        0
+      ],
+      "source": [
+        "34",
+        1
+      ],
+      "mask": [
+        "34",
+        2
+      ]
+    },
+    "class_type": "ImageCompositeMasked",
+    "_meta": {
+      "title": "ImageCompositeMasked"
+    }
+  },
+  "23": {
+    "inputs": {
+      "samples": [
+        "49",
+        0
+      ],
+      "vae": [
+        "16",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode"
+    }
+  },
+  "24": {
+    "inputs": {
+      "prompt": "",
+      "clip": [
+        "33",
+        0
+      ],
+      "vae": [
+        "16",
+        0
+      ],
+      "image1": [
+        "34",
+        1
+      ],
+      "image2": [
+        "21",
+        0
+      ]
+    },
+    "class_type": "TextEncodeQwenImageEditPlus",
+    "_meta": {
+      "title": "TextEncodeQwenImageEditPlus"
+    }
+  },
+  "28": {
+    "inputs": {
+      "stitcher": [
+        "34",
+        0
+      ],
+      "inpainted_image": [
+        "23",
+        0
+      ]
+    },
+    "class_type": "InpaintStitchImproved",
+    "_meta": {
+      "title": "✂️ Inpaint Stitch (Improved)"
+    }
+  },
+  "29": {
+    "inputs": {
+      "prompt": "Remove highlighted elements. Remove text. Preserve everything else.",
+      "clip": [
+        "33",
+        0
+      ],
+      "vae": [
+        "16",
+        0
+      ],
+      "image1": [
+        "34",
+        1
+      ],
+      "image2": [
+        "21",
+        0
+      ]
+    },
+    "class_type": "TextEncodeQwenImageEditPlus",
+    "_meta": {
+      "title": "TextEncodeQwenImageEditPlus"
+    }
+  },
+  "31": {
+    "inputs": {
+      "filename_prefix": "ComfyUI",
+      "images": [
+        "28",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "LTD_Output_Image"
+    }
+  },
+  "33": {
+    "inputs": {
+      "clip_name": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+      "type": "qwen_image",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "Load CLIP"
+    }
+  },
+  "34": {
+    "inputs": {
+      "downscale_algorithm": "bicubic",
+      "upscale_algorithm": "bicubic",
+      "preresize": false,
+      "preresize_mode": "ensure minimum resolution",
+      "preresize_min_width": 1024,
+      "preresize_min_height": 1024,
+      "preresize_max_width": 16384,
+      "preresize_max_height": 16384,
+      "mask_fill_holes": true,
+      "mask_expand_pixels": 20,
+      "mask_invert": false,
+      "mask_blend_pixels": 16,
+      "mask_hipass_filter": 0.1,
+      "extend_for_outpainting": false,
+      "extend_up_factor": 1,
+      "extend_down_factor": 1,
+      "extend_left_factor": 1,
+      "extend_right_factor": 1,
+      "context_from_mask_extend_factor": 1.2,
+      "output_resize_to_target_size": true,
+      "output_target_width": 1024,
+      "output_target_height": 1024,
+      "output_padding": "0",
+      "image": [
+        "43",
+        0
+      ],
+      "mask": [
+        "56",
+        0
+      ]
+    },
+    "class_type": "InpaintCropImproved",
+    "_meta": {
+      "title": "✂️ Inpaint Crop (Improved)"
+    }
+  },
+  "39": {
+    "inputs": {
+      "lora_name": "qie2509\\Qwen-Image-Edit-Lightning-4steps-V1.0-bf16.safetensors",
+      "lora_strength": 1,
+      "cpu_offload": "disable",
+      "model": [
+        "47",
+        0
+      ]
+    },
+    "class_type": "NunchakuQwenImageLoraLoader",
+    "_meta": {
+      "title": "Nunchaku Qwen Image LoRA Loader"
+    }
+  },
+  "43": {
+    "inputs": {
+      "image": "122877818_The Bet Ch. 5 pg. 17-20_01_thebetch5_pg17.jpg"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "LTD_Input_Image"
+    }
+  },
+  "47": {
+    "inputs": {
+      "model_name": "svdq-int4_r128-qwen-image-edit-2509-lightning-4steps-251115.safetensors",
+      "cpu_offload": "enable",
+      "num_blocks_on_gpu": 18,
+      "use_pin_memory": "disable"
+    },
+    "class_type": "NunchakuQwenImageDiTLoader",
+    "_meta": {
+      "title": "Nunchaku Qwen-Image DiT Loader"
+    }
+  },
+  "48": {
+    "inputs": {
+      "noise_mask": false,
+      "positive": [
+        "29",
+        0
+      ],
+      "negative": [
+        "24",
+        0
+      ],
+      "vae": [
+        "16",
+        0
+      ],
+      "pixels": [
+        "34",
+        1
+      ],
+      "mask": [
+        "34",
+        2
+      ]
+    },
+    "class_type": "InpaintModelConditioning",
+    "_meta": {
+      "title": "InpaintModelConditioning"
+    }
+  },
+  "49": {
+    "inputs": {
+      "seed": 736516639467182,
+      "steps": 4,
+      "cfg": 1,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1,
+      "model": [
+        "51",
+        0
+      ],
+      "positive": [
+        "48",
+        0
+      ],
+      "negative": [
+        "48",
+        1
+      ],
+      "latent_image": [
+        "48",
+        2
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "KSampler"
+    }
+  },
+  "51": {
+    "inputs": {
+      "strength": 1,
+      "model": [
+        "4",
+        0
+      ]
+    },
+    "class_type": "CFGNorm",
+    "_meta": {
+      "title": "CFGNorm"
+    }
+  },
+  "55": {
+    "inputs": {
+      "image": "122877818_The Bet Ch. 5 pg. 17-20_01_thebetch5_pg17.jpg"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "LTD_Input_Mask"
+    }
+  },
+  "56": {
+    "inputs": {
+      "channel": "red",
+      "image": [
+        "55",
+        0
+      ]
+    },
+    "class_type": "ImageToMask",
+    "_meta": {
+      "title": "Convert Image to Mask"
+    }
+  }
+}

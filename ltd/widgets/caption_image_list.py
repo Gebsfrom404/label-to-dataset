@@ -1,0 +1,462 @@
+"""Caption-specific image list with filter bar, multi-select, context menu."""
+import operator
+import re
+from fnmatch import fnmatchcase
+from pathlib import Path
+
+from PySide6.QtCore import QModelIndex, QSize, QSortFilterProxyModel, Qt, QUrl, Signal
+from PySide6.QtGui import QDesktopServices
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog,
+                               QLabel, QLineEdit, QListView, QMenu,
+                               QMessageBox, QPushButton, QVBoxLayout,
+                               QWidget)
+
+from ltd.data.image_item import ImageItem
+from ltd.data.image_list_model import ImageListModel
+
+
+# ---------------------------------------------------------------------------
+# Filter proxy model
+# ---------------------------------------------------------------------------
+
+class ImageFilterProxyModel(QSortFilterProxyModel):
+    """Proxy model that filters images by a search expression.
+
+    Supported filter syntax (space-separated terms are ANDed):
+      - plain text     : matches filename or any tag (case-insensitive)
+      - tag:pattern    : any tag matches pattern (wildcard * and ?)
+      - name:pattern   : filename matches pattern
+      - path:pattern   : full path matches pattern
+      - tags:>N        : tag count comparison (=, !=, <, >, <=, >=)
+    """
+
+    _OPS = {
+        '=': operator.eq, '==': operator.eq, '!=': operator.ne,
+        '<': operator.lt, '>': operator.gt,
+        '<=': operator.le, '>=': operator.ge,
+    }
+    _NUM_RE = re.compile(r'^(==?|!=|<=?|>=?)(\d+)$')
+
+    def __init__(self, source_model: ImageListModel, parent=None):
+        super().__init__(parent)
+        self.setSourceModel(source_model)
+        self._filter_terms: list[tuple] = []  # parsed terms
+
+    def set_filter_text(self, text: str):
+        raw = text.strip()
+        self._filter_terms = self._parse(raw) if raw else []
+        self.invalidateFilter()
+
+    # -- parsing --
+
+    @staticmethod
+    def _tokenize(text: str) -> list[str]:
+        """Split on spaces but respect quoted strings."""
+        tokens: list[str] = []
+        buf = ''
+        in_quote = ''
+        for ch in text:
+            if in_quote:
+                if ch == in_quote:
+                    in_quote = ''
+                else:
+                    buf += ch
+            elif ch in ('"', "'"):
+                in_quote = ch
+            elif ch == ' ':
+                if buf:
+                    tokens.append(buf)
+                    buf = ''
+            else:
+                buf += ch
+        if buf:
+            tokens.append(buf)
+        return tokens
+
+    def _parse(self, text: str) -> list[tuple]:
+        terms = []
+        for token in self._tokenize(text):
+            if ':' in token:
+                key, _, value = token.partition(':')
+                key_lower = key.lower()
+                if key_lower == 'tag':
+                    terms.append(('tag', value))
+                elif key_lower == 'name':
+                    terms.append(('name', value))
+                elif key_lower == 'path':
+                    terms.append(('path', value))
+                elif key_lower == 'tags':
+                    m = self._NUM_RE.match(value)
+                    if m:
+                        terms.append(('tags_num', m.group(1), int(m.group(2))))
+                    else:
+                        # treat as plain text
+                        terms.append(('text', token))
+                else:
+                    terms.append(('text', token))
+            else:
+                terms.append(('text', token))
+        return terms
+
+    # -- matching --
+
+    @staticmethod
+    def _wild(pattern: str, value: str) -> bool:
+        """Case-insensitive wildcard match. Auto-wraps in * if no wildcards."""
+        p = pattern.lower()
+        v = value.lower()
+        if '*' in p or '?' in p:
+            return fnmatchcase(v, p)
+        return p in v
+
+    def _image_matches(self, image: ImageItem) -> bool:
+        for term in self._filter_terms:
+            kind = term[0]
+            if kind == 'text':
+                needle = term[1].lower()
+                if needle not in image.filename.lower() and \
+                   not any(needle in t.lower() for t in image.tags):
+                    return False
+            elif kind == 'tag':
+                pattern = term[1]
+                if not any(self._wild(pattern, t) for t in image.tags):
+                    return False
+            elif kind == 'name':
+                if not self._wild(term[1], image.filename):
+                    return False
+            elif kind == 'path':
+                if not self._wild(term[1], str(image.path)):
+                    return False
+            elif kind == 'tags_num':
+                op_str, num = term[1], term[2]
+                op_fn = self._OPS.get(op_str)
+                if op_fn and not op_fn(len(image.tags), num):
+                    return False
+        return True
+
+    def filterAcceptsRow(self, source_row: int,
+                         source_parent: QModelIndex) -> bool:
+        if not self._filter_terms:
+            return True
+        source = self.sourceModel()
+        image = source.data(source.index(source_row, 0),
+                            Qt.ItemDataRole.UserRole)
+        if image is None:
+            return False
+        return self._image_matches(image)
+
+
+# ---------------------------------------------------------------------------
+# Caption Image List Widget
+# ---------------------------------------------------------------------------
+
+class CaptionImageList(QWidget):
+    """Image list with search bar, multi-selection, and context menu."""
+
+    current_changed = Signal(int)           # source model row
+    selection_changed = Signal(list)         # list of source model rows
+    load_directory_requested = Signal(str)
+    tags_paste_requested = Signal(list, list)  # tags, source indices
+
+    def __init__(self, model: ImageListModel, parent=None):
+        super().__init__(parent)
+        self.model = model
+        self.proxy = ImageFilterProxyModel(model)
+        self._setup_ui()
+        self._setup_context_menu()
+        self._connect_signals()
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self.load_button = QPushButton('Load Folder...')
+        layout.addWidget(self.load_button)
+
+        # Filter bar
+        self.filter_input = QLineEdit()
+        self.filter_input.setPlaceholderText(
+            'Filter: text, tag:*, name:*, tags:>N')
+        self.filter_input.setClearButtonEnabled(True)
+        layout.addWidget(self.filter_input)
+
+        # List view with proxy model
+        self.list_view = QListView()
+        self.list_view.setModel(self.proxy)
+        self.list_view.setViewMode(QListView.ViewMode.ListMode)
+        self.list_view.setIconSize(QSize(160, 90))
+        self.list_view.setSpacing(2)
+        self.list_view.setUniformItemSizes(False)
+        self.list_view.setSelectionMode(
+            QListView.SelectionMode.ExtendedSelection)
+        self.list_view.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu)
+        layout.addWidget(self.list_view, stretch=1)
+
+        # Counter
+        self.counter_label = QLabel('0 / 0')
+        self.counter_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.counter_label)
+
+    def _setup_context_menu(self):
+        self.context_menu = QMenu(self)
+
+        self._act_select_all = self.context_menu.addAction('Select All')
+        self._act_select_all.setShortcut('Ctrl+A')
+        self._act_select_all.triggered.connect(self.list_view.selectAll)
+
+        self._act_invert = self.context_menu.addAction('Invert Selection')
+        self._act_invert.setShortcut('Ctrl+I')
+        self._act_invert.triggered.connect(self._invert_selection)
+
+        self.context_menu.addSeparator()
+
+        self._act_copy_tags = self.context_menu.addAction('Copy Tags')
+        self._act_copy_tags.setShortcut('Ctrl+C')
+        self._act_copy_tags.triggered.connect(self._copy_tags)
+
+        self._act_paste_tags = self.context_menu.addAction('Paste Tags')
+        self._act_paste_tags.setShortcut('Ctrl+V')
+        self._act_paste_tags.triggered.connect(self._paste_tags)
+
+        self._act_clear_tags = self.context_menu.addAction(
+            'Delete Tags from Selected')
+        self._act_clear_tags.triggered.connect(self._clear_selected_tags)
+
+        self.context_menu.addSeparator()
+
+        self._act_copy_names = self.context_menu.addAction('Copy File Names')
+        self._act_copy_names.setShortcut('Ctrl+Alt+C')
+        self._act_copy_names.triggered.connect(self._copy_file_names)
+
+        self._act_copy_paths = self.context_menu.addAction('Copy Paths')
+        self._act_copy_paths.setShortcut('Ctrl+Shift+C')
+        self._act_copy_paths.triggered.connect(self._copy_paths)
+
+        self.context_menu.addSeparator()
+
+        self._act_copy_images = self.context_menu.addAction(
+            'Copy Images to...')
+        self._act_copy_images.setShortcut('Ctrl+Shift+M')
+        self._act_copy_images.triggered.connect(self._copy_images_to)
+
+        self._act_open = self.context_menu.addAction(
+            'Open in Default App')
+        self._act_open.setShortcut('Ctrl+O')
+        self._act_open.triggered.connect(self._open_image)
+
+        # Register shortcuts on list_view so they work without menu open
+        for act in self.context_menu.actions():
+            if not act.isSeparator():
+                self.list_view.addAction(act)
+
+    def _connect_signals(self):
+        self.load_button.clicked.connect(self._on_load_clicked)
+        self.filter_input.textChanged.connect(self._on_filter_changed)
+        self.list_view.selectionModel().currentChanged.connect(
+            self._on_current_changed)
+        self.list_view.selectionModel().selectionChanged.connect(
+            self._on_selection_changed)
+        self.list_view.customContextMenuRequested.connect(
+            self._show_context_menu)
+        self.model.modelReset.connect(self._on_model_reset)
+
+    def _on_model_reset(self):
+        self.list_view.selectionModel().currentChanged.connect(
+            self._on_current_changed)
+        self.list_view.selectionModel().selectionChanged.connect(
+            self._on_selection_changed)
+        self._update_counter()
+
+    def _on_filter_changed(self, text: str):
+        self.proxy.set_filter_text(text)
+        self._update_counter()
+
+    def _on_current_changed(self, current: QModelIndex,
+                            previous: QModelIndex):
+        if current.isValid():
+            source_idx = self.proxy.mapToSource(current)
+            self.current_changed.emit(source_idx.row())
+            self._update_counter()
+
+    def _on_selection_changed(self):
+        self._update_counter()
+        self._update_context_actions()
+
+    def _update_counter(self):
+        current = self.list_view.currentIndex()
+        if current.isValid():
+            # Show position within proxy (filtered) list
+            row = current.row() + 1
+        else:
+            row = 0
+        visible = self.proxy.rowCount()
+        total = self.model.rowCount()
+        if visible < total:
+            self.counter_label.setText(f'{row} / {visible} ({total} total)')
+        else:
+            self.counter_label.setText(f'{row} / {total}')
+
+    def _update_context_actions(self):
+        count = len(self.list_view.selectionModel().selectedIndexes())
+        s = 's' if count != 1 else ''
+        self._act_copy_names.setText(f'Copy File Name{s}')
+        self._act_copy_paths.setText(f'Copy Path{s}')
+        self._act_copy_images.setText(f'Copy Image{s} to...')
+        self._act_open.setVisible(count == 1)
+        self._act_clear_tags.setText(
+            f'Delete Tags from {count} Image{s}' if count else
+            'Delete Tags from Selected')
+
+    def _show_context_menu(self, pos):
+        self.context_menu.exec(self.list_view.mapToGlobal(pos))
+
+    # -- public API --
+
+    def select_index(self, source_row: int):
+        """Select image by source model row."""
+        source_idx = self.model.index(source_row)
+        proxy_idx = self.proxy.mapFromSource(source_idx)
+        if proxy_idx.isValid():
+            self.list_view.setCurrentIndex(proxy_idx)
+            self.list_view.scrollTo(proxy_idx)
+
+    def current_source_row(self) -> int:
+        current = self.list_view.currentIndex()
+        if current.isValid():
+            return self.proxy.mapToSource(current).row()
+        return -1
+
+    def selected_source_rows(self) -> list[int]:
+        """Return source model row indices for all selected images."""
+        rows = []
+        for proxy_idx in self.list_view.selectionModel().selectedIndexes():
+            source_idx = self.proxy.mapToSource(proxy_idx)
+            rows.append(source_idx.row())
+        return sorted(rows)
+
+    def get_selected_images(self) -> list[ImageItem]:
+        return [self.model.images[r] for r in self.selected_source_rows()]
+
+    def go_to_previous(self):
+        current = self.list_view.currentIndex()
+        if current.isValid() and current.row() > 0:
+            new_idx = self.proxy.index(current.row() - 1, 0)
+            self.list_view.setCurrentIndex(new_idx)
+
+    def go_to_next(self):
+        current = self.list_view.currentIndex()
+        if current.isValid() and current.row() < self.proxy.rowCount() - 1:
+            new_idx = self.proxy.index(current.row() + 1, 0)
+            self.list_view.setCurrentIndex(new_idx)
+
+    # -- load --
+
+    def _on_load_clicked(self):
+        from ltd.settings import get_settings, DEFAULT_SETTINGS
+        settings = get_settings()
+        last_dir = settings.value('last_label_directory',
+                                  DEFAULT_SETTINGS['last_label_directory'],
+                                  type=str)
+        directory = QFileDialog.getExistingDirectory(
+            self, 'Select Image Directory', last_dir)
+        if directory:
+            settings.setValue('last_label_directory', directory)
+            self.load_directory_requested.emit(directory)
+
+    # -- context menu actions --
+
+    def _invert_selection(self):
+        sel_model = self.list_view.selectionModel()
+        selected = set(idx.row() for idx in sel_model.selectedIndexes())
+        all_rows = set(range(self.proxy.rowCount()))
+        unselected = all_rows - selected
+
+        from PySide6.QtCore import QItemSelection, QItemSelectionRange
+        selection = QItemSelection()
+        for row in unselected:
+            idx = self.proxy.index(row, 0)
+            selection.append(QItemSelectionRange(idx))
+        sel_model.select(selection,
+                         sel_model.SelectionFlag.ClearAndSelect)
+        if unselected:
+            first = min(unselected)
+            self.list_view.setCurrentIndex(self.proxy.index(first, 0))
+
+    def _copy_tags(self):
+        images = self.get_selected_images()
+        if not images:
+            return
+        captions = [', '.join(img.tags) for img in images]
+        QApplication.clipboard().setText('\n'.join(captions))
+
+    def _paste_tags(self):
+        text = QApplication.clipboard().text().strip()
+        if not text:
+            return
+        rows = self.selected_source_rows()
+        if not rows:
+            return
+
+        tags = [t.strip() for t in text.split(',') if t.strip()]
+        if len(rows) > 1:
+            reply = QMessageBox.question(
+                self, 'Paste Tags',
+                f'Paste tags to {len(rows)} selected images?',
+                QMessageBox.StandardButton.Yes |
+                QMessageBox.StandardButton.No)
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+        self.tags_paste_requested.emit(tags, rows)
+
+    def _clear_selected_tags(self):
+        rows = self.selected_source_rows()
+        if not rows:
+            return
+        reply = QMessageBox.question(
+            self, 'Delete Tags',
+            f'Delete all tags from {len(rows)} selected image(s)?',
+            QMessageBox.StandardButton.Yes |
+            QMessageBox.StandardButton.No)
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        for row in rows:
+            self.model.images[row].tags = []
+        # Emit so caption tab refreshes
+        self.tags_paste_requested.emit([], rows)
+
+    def _copy_file_names(self):
+        images = self.get_selected_images()
+        names = [img.filename for img in images]
+        QApplication.clipboard().setText('\n'.join(names))
+
+    def _copy_paths(self):
+        images = self.get_selected_images()
+        paths = [str(img.path) for img in images]
+        QApplication.clipboard().setText('\n'.join(paths))
+
+    def _copy_images_to(self):
+        images = self.get_selected_images()
+        if not images:
+            return
+        dest = QFileDialog.getExistingDirectory(
+            self, f'Copy {len(images)} Image(s) to...')
+        if not dest:
+            return
+        dest_path = Path(dest)
+        for img in images:
+            try:
+                import shutil as _shutil
+                _shutil.copy2(img.path, dest_path / img.filename)
+                if img.caption_path.exists():
+                    _shutil.copy2(img.caption_path,
+                                  dest_path / img.caption_path.name)
+            except OSError as e:
+                QMessageBox.critical(
+                    self, 'Error', f'Failed to copy {img.filename}: {e}')
+
+    def _open_image(self):
+        images = self.get_selected_images()
+        if images:
+            QDesktopServices.openUrl(
+                QUrl.fromLocalFile(str(images[0].path)))
