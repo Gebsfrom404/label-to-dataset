@@ -22,9 +22,16 @@ def get_temp_dir_no_clear(subdir: str) -> Path:
 
 
 def cleanup_all_temp():
-    """Remove all temp data on exit."""
-    if _TEMP_ROOT.exists():
-        shutil.rmtree(_TEMP_ROOT, ignore_errors=True)
+    """Remove all temp data on exit, preserving persistent label dirs."""
+    if not _TEMP_ROOT.exists():
+        return
+    for child in _TEMP_ROOT.iterdir():
+        if child.name.startswith('labels_'):
+            continue
+        if child.is_dir():
+            shutil.rmtree(child, ignore_errors=True)
+        else:
+            child.unlink(missing_ok=True)
 
 
 def ensure_dir(path: Path) -> Path:

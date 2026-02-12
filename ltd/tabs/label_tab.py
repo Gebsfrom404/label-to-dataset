@@ -295,18 +295,24 @@ class LabelTab(QWidget):
             self.classes_list.setCurrentRow(0)
 
     def _load_directory(self, path: str):
+        import hashlib
         directory = Path(path)
         self.model.load_directory(directory)
 
-        # Create temp labels dir for this session
-        self._labels_dir = get_temp_dir('label_annotations')
+        # Stable per-directory temp labels dir (survives app restarts)
+        dir_hash = hashlib.md5(str(directory.resolve()).encode()).hexdigest()[:12]
+        self._labels_dir = get_temp_dir_no_clear(f'labels_{dir_hash}')
 
         for image in self.model.images:
-            # Load existing in-place labels if present
+            # Prefer temp labels (previous session), fall back to in-place
+            temp_txt = self._label_path_for(image)
             inplace_txt = image.path.with_suffix('.txt')
-            if inplace_txt.exists():
+            if temp_txt.exists():
+                image.labels = read_yolo_labels(temp_txt)
+            elif inplace_txt.exists():
                 image.labels = read_yolo_labels(inplace_txt)
 
+        self._undo_stacks.clear()
         if self.model.rowCount() > 0:
             self.image_list.select_index(0)
 

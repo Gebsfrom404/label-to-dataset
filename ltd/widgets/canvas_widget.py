@@ -147,13 +147,10 @@ class CanvasWidget(QGraphicsView):
         self._image_width = pixmap.width()
         self._image_height = pixmap.height()
 
-        # Create mask buffer
+        # Create mask buffer (starts empty — no overlay needed)
         self._mask_buffer = QImage(self._image_width, self._image_height,
                                    QImage.Format.Format_Grayscale8)
         self._mask_buffer.fill(Qt.GlobalColor.black)
-
-        # Create mask overlay (starts empty, fast path)
-        self._update_mask_overlay_fast()
 
         # Create brush cursor
         self._create_brush_cursor()
@@ -614,12 +611,14 @@ class CanvasWidget(QGraphicsView):
         self._drawing = True
         self._erase_mode = erase
         self._draw_stroke_count = 0
-        self._draw_on_mask(pos)
+        self._last_draw_pos = pos
+        self._draw_on_mask(pos, pos)
 
     def _continue_drawing(self, pos: QPointF, erase: bool):
-        self._draw_on_mask(pos)
+        self._draw_on_mask(self._last_draw_pos, pos)
+        self._last_draw_pos = pos
         self._draw_stroke_count += 1
-        if self._draw_stroke_count % 3 == 0:
+        if self._draw_stroke_count % 6 == 0:
             self._update_mask_overlay_fast()
 
     def _stop_drawing(self):
@@ -628,12 +627,15 @@ class CanvasWidget(QGraphicsView):
         self._update_mask_overlay_fast()
         self.mask_updated.emit(erase)
 
-    def _draw_on_mask(self, pos: QPointF):
-        """Always paint white to track the stroke area."""
+    def _draw_on_mask(self, from_pos: QPointF, to_pos: QPointF):
+        """Draw a continuous stroke between two points on the mask."""
         if self._mask_buffer is None:
             return
         painter = QPainter(self._mask_buffer)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QBrush(Qt.GlobalColor.white))
-        painter.drawEllipse(pos.toPoint(), self._brush_size, self._brush_size)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        pen = QPen(Qt.GlobalColor.white, self._brush_size * 2,
+                   Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
+                   Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.drawLine(from_pos.toPoint(), to_pos.toPoint())
         painter.end()
