@@ -2,9 +2,10 @@
 import copy
 import random
 import shutil
+from collections import OrderedDict
 from pathlib import Path
 
-from PySide6.QtCore import QModelIndex, Qt, Signal
+from PySide6.QtCore import QModelIndex, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPixmap, QShortcut, QKeySequence
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QGroupBox,
                                QHBoxLayout, QLabel, QListWidget,
@@ -18,7 +19,7 @@ from ltd.data.label_data import (DEFAULT_COLORS, DetectionType, Label,
                                   LabelClass)
 from ltd.settings import get_settings
 from ltd.utils.file_utils import get_temp_dir, get_temp_dir_no_clear
-from ltd.utils.image_utils import load_pixmap
+from ltd.utils.image_utils import load_pixmap_preview
 from ltd.utils.mask_utils import (bbox_to_mask, create_empty_mask,
                                    label_to_mask, mask_from_qimage,
                                    mask_to_polygons, masks_overlap,
@@ -38,6 +39,8 @@ class LabelTab(QWidget):
     copy_to_train_requested = Signal(str, str)  # (dataset path, model_type)
     dataset_saved = Signal(str)  # dataset directory path
 
+    _PIXMAP_CACHE_MAX = 5
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.model = ImageListModel()
@@ -45,6 +48,7 @@ class LabelTab(QWidget):
         self._current_image_index = -1
         self._worker: DetectionWorker | None = None
         self._labels_dir: Path | None = None
+        self._pixmap_cache: OrderedDict[str, object] = OrderedDict()
 
         # Undo: per-image stack of label snapshots
         # key = image index, value = list of label list snapshots
@@ -296,6 +300,7 @@ class LabelTab(QWidget):
 
     def _load_directory(self, path: str):
         import hashlib
+        self._pixmap_cache.clear()
         directory = Path(path)
         self.model.load_directory(directory)
 
@@ -322,13 +327,38 @@ class LabelTab(QWidget):
         if image is None:
             return
 
-        pixmap = load_pixmap(image.path)
+        pixmap = self._load_cached(image.path)
         if pixmap:
             self.canvas.load_image(pixmap)
             colors = self._get_colors()
             self.canvas.display_labels(image.labels, colors)
             self._refresh_labels_list()
             self.canvas.setFocus()
+
+        QTimer.singleShot(0, lambda idx=index: self._preload_adjacent(idx))
+
+    def _preview_max_dim(self) -> int:
+        vp = self.canvas.viewport().size()
+        return max(vp.width(), vp.height(), 800) * 2
+
+    def _load_cached(self, path):
+        key = str(path)
+        if key in self._pixmap_cache:
+            self._pixmap_cache.move_to_end(key)
+            return self._pixmap_cache[key]
+        pixmap = load_pixmap_preview(path, self._preview_max_dim())
+        self._pixmap_cache[key] = pixmap
+        while len(self._pixmap_cache) > self._PIXMAP_CACHE_MAX:
+            self._pixmap_cache.popitem(last=False)
+        return pixmap
+
+    def _preload_adjacent(self, index: int):
+        if index != self._current_image_index:
+            return
+        for offset in (-1, 1):
+            image = self.model.get_image(index + offset)
+            if image and str(image.path) not in self._pixmap_cache:
+                self._load_cached(image.path)
 
     def _get_colors(self) -> list[str]:
         return [c.color for c in self.classes] if self.classes else list(DEFAULT_COLORS)

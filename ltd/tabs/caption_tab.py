@@ -2,17 +2,19 @@
 import csv
 import re
 import shutil
+from collections import OrderedDict
+from fnmatch import fnmatchcase
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QBrush, QColor, QKeySequence, QPainter, QShortcut
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QCompleter,
                                QDialog, QDoubleSpinBox, QGraphicsScene,
                                QGraphicsView, QGroupBox, QHBoxLayout, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem,
                                QFileDialog, QMessageBox, QProgressBar,
-                               QPushButton, QSpinBox, QSplitter,
+                               QPushButton, QSpinBox, QSplitter, QTabWidget,
                                QVBoxLayout, QWidget)
 
 from ltd.comfyui.client import ComfyUIClient
@@ -24,7 +26,7 @@ from ltd.data.image_list_model import IMAGE_EXTENSIONS, ImageListModel
 from ltd.dialogs.batch_reorder_dialog import BatchReorderDialog
 from ltd.dialogs.find_replace_dialog import FindReplaceDialog
 from ltd.utils.file_utils import get_temp_dir
-from ltd.utils.image_utils import load_pixmap
+from ltd.utils.image_utils import load_pixmap_preview
 from ltd.widgets.caption_image_list import CaptionImageList
 from ltd.widgets.workflow_selector import WorkflowSelector
 from ltd.workers.caption_worker import CaptionWorker
@@ -190,6 +192,9 @@ class EditableTagsList(QListWidget):
     """Tags list with drag-drop reorder, inline editing, Delete key."""
     tags_changed = Signal()
 
+    _HIGHLIGHT_BRUSH = QBrush(QColor(255, 200, 50, 70))
+    _CLEAR_BRUSH = QBrush()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
@@ -200,6 +205,7 @@ class EditableTagsList(QListWidget):
             QAbstractItemView.EditTrigger.EditKeyPressed)
         self.model().rowsMoved.connect(lambda: self.tags_changed.emit())
         self.itemChanged.connect(lambda: self.tags_changed.emit())
+        self._highlight_patterns: list[tuple] = []
 
     def keyPressEvent(self, event):
         if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
@@ -222,12 +228,52 @@ class EditableTagsList(QListWidget):
 
     def set_tags(self, tags: list[str]):
         self.blockSignals(True)
+        self.setUpdatesEnabled(False)
         self.clear()
         for tag in tags:
             item = QListWidgetItem(tag)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
             self.addItem(item)
         self.blockSignals(False)
+        self._apply_highlights()
+        self.setUpdatesEnabled(True)
+
+    # -- search highlight --
+
+    def set_highlight_patterns(self, patterns: list[tuple]):
+        """Set tag patterns to highlight. Each is ('tag', value) or ('text', value)."""
+        self._highlight_patterns = patterns
+        self._apply_highlights()
+
+    def _apply_highlights(self):
+        # Block signals: setBackground triggers itemChanged → tags_changed
+        # which would cause _rebuild_all_tags per item (O(n*images) each).
+        self.blockSignals(True)
+        hl = self._HIGHLIGHT_BRUSH if self._highlight_patterns else None
+        for i in range(self.count()):
+            item = self.item(i)
+            if hl and self._tag_matches(item.text()):
+                item.setBackground(hl)
+            else:
+                item.setBackground(self._CLEAR_BRUSH)
+        self.blockSignals(False)
+
+    def _tag_matches(self, tag_text: str) -> bool:
+        tag_lower = tag_text.strip().lower()
+        for kind, value in self._highlight_patterns:
+            v = value.lower()
+            if kind == 'tag':
+                if '*' in v or '?' in v:
+                    if fnmatchcase(tag_lower, v):
+                        return True
+                else:
+                    # Exact tag match (same as filter proxy)
+                    if tag_lower == v:
+                        return True
+            elif kind == 'text':
+                if v in tag_lower:
+                    return True
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -257,16 +303,106 @@ class AllTagsList(QListWidget):
 
 
 # ---------------------------------------------------------------------------
+# Tag Input (fixes completer eating the clear on Enter)
+# ---------------------------------------------------------------------------
+
+class TagInputField(QLineEdit):
+    """Tag input that clears properly after Enter, bypassing completer."""
+    tag_submitted = Signal()
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.tag_submitted.emit()
+            self.clear()
+            return
+        super().keyPressEvent(event)
+
+
+# ---------------------------------------------------------------------------
+# Image Viewer (auto-fit, Ctrl+scroll zoom, spacebar+drag pan)
+# ---------------------------------------------------------------------------
+
+class CaptionImageViewer(QGraphicsView):
+    """Image viewer with auto-fit, Ctrl+scroll zoom, Space+drag pan."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._scene = QGraphicsScene(self)
+        self.setScene(self._scene)
+        self.setRenderHints(QPainter.RenderHint.SmoothPixmapTransform)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._pixmap_item = None
+        self._manually_zoomed = False
+
+    def load_image(self, pixmap):
+        self._scene.clear()
+        self._pixmap_item = None
+        if pixmap:
+            self._pixmap_item = self._scene.addPixmap(pixmap)
+            # Reset scene rect to this pixmap's bounds so fitInView
+            # doesn't use a stale rect from a previously larger image.
+            self._scene.setSceneRect(self._pixmap_item.boundingRect())
+            self._manually_zoomed = False
+            self._fit_image()
+        else:
+            self._scene.setSceneRect(0, 0, 0, 0)
+
+    def _fit_image(self):
+        if self._pixmap_item:
+            self.fitInView(self._scene.sceneRect(),
+                           Qt.AspectRatioMode.KeepAspectRatio)
+            self._manually_zoomed = False
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if not self._manually_zoomed and self._pixmap_item:
+            self.fitInView(self._scene.sceneRect(),
+                           Qt.AspectRatioMode.KeepAspectRatio)
+
+    def wheelEvent(self, event):
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            factor = 1.2 if event.angleDelta().y() > 0 else 1 / 1.2
+            self.scale(factor, factor)
+            self._manually_zoomed = True
+            event.accept()
+        else:
+            super().wheelEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Space and not event.isAutoRepeat():
+            self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+            event.accept()
+            return
+        # Ctrl+0 to reset zoom to fit
+        if (event.key() == Qt.Key.Key_0
+                and event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+            self._fit_image()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event):
+        if event.key() == Qt.Key.Key_Space and not event.isAutoRepeat():
+            self.setDragMode(QGraphicsView.DragMode.NoDrag)
+            event.accept()
+            return
+        super().keyReleaseEvent(event)
+
+
+# ---------------------------------------------------------------------------
 # Caption Tab
 # ---------------------------------------------------------------------------
 
 class CaptionTab(QWidget):
+    _PIXMAP_CACHE_MAX = 5
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.model = ImageListModel()
         self._current_image_index = -1
         self._all_tags: dict[str, int] = {}  # tag -> count
         self._worker: CaptionWorker | None = None
+        self._pixmap_cache: OrderedDict[str, object] = OrderedDict()
 
         self._setup_ui()
         self._connect_signals()
@@ -286,24 +422,22 @@ class CaptionTab(QWidget):
         self.image_list = CaptionImageList(self.model)
         splitter.addWidget(self.image_list)
 
-        # --- Center: Image preview + tag editor ---
-        center = QWidget()
-        center_layout = QVBoxLayout(center)
-        center_layout.setContentsMargins(0, 0, 0, 0)
+        # --- Center: Image viewer (auto-fit, Ctrl+scroll zoom, Space+drag) -
+        self.image_viewer = CaptionImageViewer()
+        splitter.addWidget(self.image_viewer)
 
-        # Image preview
-        self.image_view = QGraphicsView()
-        self.image_scene = QGraphicsScene()
-        self.image_view.setScene(self.image_scene)
-        center_layout.addWidget(self.image_view, stretch=2)
+        # --- Right: Tabbed panel ---
+        right = QWidget()
+        right_layout = QVBoxLayout(right)
 
-        # Image tags
-        tag_group = QGroupBox('Image Tags')
-        tag_layout = QVBoxLayout(tag_group)
+        self.right_tabs = QTabWidget()
 
-        # Tag input
+        # ---- Tab: Image Tags ----
+        image_tags_tab = QWidget()
+        tag_layout = QVBoxLayout(image_tags_tab)
+
         input_layout = QHBoxLayout()
-        self.tag_input = QLineEdit()
+        self.tag_input = TagInputField()
         self.tag_input.setPlaceholderText('Add tag (Enter to add)...')
         self.tag_completer = QCompleter([])
         self.tag_completer.setCaseSensitivity(
@@ -315,11 +449,9 @@ class CaptionTab(QWidget):
         input_layout.addWidget(self.add_tag_btn)
         tag_layout.addLayout(input_layout)
 
-        # Tag list (editable, drag-drop, delete key)
         self.tags_list = EditableTagsList()
         tag_layout.addWidget(self.tags_list)
 
-        # Tag action buttons
         tag_btn_layout = QHBoxLayout()
         self.remove_tag_btn = QPushButton('Remove Selected')
         self.clear_tags_btn = QPushButton('Clear All')
@@ -329,27 +461,20 @@ class CaptionTab(QWidget):
         tag_btn_layout.addWidget(self.remove_dupes_btn)
         tag_layout.addLayout(tag_btn_layout)
 
-        # Token count
         self.token_count_label = QLabel('Tags: 0 | ~0 tokens')
         tag_layout.addWidget(self.token_count_label)
 
-        center_layout.addWidget(tag_group, stretch=1)
-        splitter.addWidget(center)
+        self.right_tabs.addTab(image_tags_tab, 'Image Tags')
 
-        # --- Right: All tags + Captioner + Tools ---
-        right = QWidget()
-        right_layout = QVBoxLayout(right)
-
-        # All Tags
-        all_tags_group = QGroupBox('All Tags')
-        all_tags_layout = QVBoxLayout(all_tags_group)
+        # ---- Tab: All Tags ----
+        all_tags_tab = QWidget()
+        all_tags_layout = QVBoxLayout(all_tags_tab)
 
         self.all_tags_filter = QLineEdit()
         self.all_tags_filter.setPlaceholderText('Filter tags...')
         self.all_tags_filter.setClearButtonEnabled(True)
         all_tags_layout.addWidget(self.all_tags_filter)
 
-        # Sort controls
         sort_layout = QHBoxLayout()
         sort_layout.addWidget(QLabel('Sort:'))
         self.sort_combo = QComboBox()
@@ -360,7 +485,6 @@ class CaptionTab(QWidget):
         sort_layout.addWidget(self.sort_order_combo)
         all_tags_layout.addLayout(sort_layout)
 
-        # Click action
         action_layout = QHBoxLayout()
         action_layout.addWidget(QLabel('Click:'))
         self.click_action_combo = QComboBox()
@@ -374,11 +498,11 @@ class CaptionTab(QWidget):
         self.all_tags_count_label = QLabel('0 tags')
         all_tags_layout.addWidget(self.all_tags_count_label)
 
-        right_layout.addWidget(all_tags_group)
+        self.right_tabs.addTab(all_tags_tab, 'All Tags')
 
-        # Auto-Captioner
-        caption_group = QGroupBox('Auto-Caption')
-        caption_layout = QVBoxLayout(caption_group)
+        # ---- Tab: Auto-Caption ----
+        caption_tab_w = QWidget()
+        caption_layout = QVBoxLayout(caption_tab_w)
 
         self.captioner_combo = QComboBox()
         self.captioner_combo.addItems(
@@ -407,13 +531,11 @@ class CaptionTab(QWidget):
         max_layout.addWidget(self.max_tags_spin)
         wd_layout.addLayout(max_layout)
 
-        # Tags to exclude
         self.exclude_input = QLineEdit()
         self.exclude_input.setPlaceholderText(
             'Tags to exclude (comma-separated)...')
         wd_layout.addWidget(self.exclude_input)
 
-        # Caption position
         pos_layout = QHBoxLayout()
         pos_layout.addWidget(QLabel('Position:'))
         self.caption_position_combo = QComboBox()
@@ -430,17 +552,17 @@ class CaptionTab(QWidget):
 
         # ComfyUI workflow
         self.comfy_settings = QWidget()
-        comfy_layout = QVBoxLayout(self.comfy_settings)
-        comfy_layout.setContentsMargins(0, 0, 0, 0)
-        self._caption_workflow_selector = WorkflowSelector(settings_key='caption')
-        comfy_layout.addWidget(self._caption_workflow_selector)
+        comfy_layout_inner = QVBoxLayout(self.comfy_settings)
+        comfy_layout_inner.setContentsMargins(0, 0, 0, 0)
+        self._caption_workflow_selector = WorkflowSelector(
+            settings_key='caption')
+        comfy_layout_inner.addWidget(self._caption_workflow_selector)
         info = QLabel('Required nodes: LTD_Input_Image, LTD_Output_Text')
         info.setWordWrap(True)
-        comfy_layout.addWidget(info)
+        comfy_layout_inner.addWidget(info)
         caption_layout.addWidget(self.comfy_settings)
         self.comfy_settings.setVisible(False)
 
-        # Caption buttons
         cap_btn_layout = QHBoxLayout()
         self.caption_current_btn = QPushButton('Current')
         self.caption_selected_btn = QPushButton('Selected')
@@ -458,39 +580,42 @@ class CaptionTab(QWidget):
         self.caption_progress.setVisible(False)
         caption_layout.addWidget(self.caption_progress)
 
-        self.caption_status = QLabel('')
-        caption_layout.addWidget(self.caption_status)
+        caption_layout.addStretch()
+        self.right_tabs.addTab(caption_tab_w, 'Auto-Caption')
 
-        right_layout.addWidget(caption_group)
-
-        # Tools
-        tools_group = QGroupBox('Tools')
-        tools_layout = QVBoxLayout(tools_group)
+        # ---- Tab: Tools ----
+        tools_tab = QWidget()
+        tools_layout = QVBoxLayout(tools_tab)
 
         tools_row1 = QHBoxLayout()
-        self.find_replace_btn = QPushButton('Find && Replace...')
-        self.batch_reorder_btn = QPushButton('Batch Reorder...')
+        self.find_replace_btn = QPushButton('Find && Replace  (Ctrl+R)')
+        self.batch_reorder_btn = QPushButton('Batch Reorder  (Ctrl+B)')
         tools_row1.addWidget(self.find_replace_btn)
         tools_row1.addWidget(self.batch_reorder_btn)
         tools_layout.addLayout(tools_row1)
 
         tools_row2 = QHBoxLayout()
-        self.remove_empty_btn = QPushButton('Remove Empty Tags')
-        self.remove_dupes_all_btn = QPushButton('Remove Duplicates (All)')
+        self.remove_empty_btn = QPushButton('Remove Empty  (Ctrl+E)')
+        self.remove_dupes_all_btn = QPushButton('Deduplicate All  (Ctrl+D)')
         tools_row2.addWidget(self.remove_empty_btn)
         tools_row2.addWidget(self.remove_dupes_all_btn)
         tools_layout.addLayout(tools_row2)
 
-        right_layout.addWidget(tools_group)
+        tools_layout.addStretch()
+        self.right_tabs.addTab(tools_tab, 'Tools')
 
-        # Save
-        self.save_captions_btn = QPushButton('Save All Captions')
+        right_layout.addWidget(self.right_tabs)
+
+        # Save/export (outside tabs)
+        self.save_captions_btn = QPushButton('Save All Captions  (Ctrl+S)')
         right_layout.addWidget(self.save_captions_btn)
 
         self.export_captions_btn = QPushButton('Export Images + Captions...')
         right_layout.addWidget(self.export_captions_btn)
 
-        right_layout.addStretch()
+        self.caption_status = QLabel('')
+        right_layout.addWidget(self.caption_status)
+
         splitter.addWidget(right)
         splitter.setSizes([200, 500, 300])
         layout.addWidget(splitter)
@@ -504,10 +629,12 @@ class CaptionTab(QWidget):
         self.image_list.current_changed.connect(self._on_image_changed)
         self.image_list.load_directory_requested.connect(self._load_directory)
         self.image_list.tags_paste_requested.connect(self._on_tags_pasted)
+        self.image_list.filter_input.textChanged.connect(
+            self._update_tag_highlights)
 
         # Tag input
         self.add_tag_btn.clicked.connect(self._add_tag)
-        self.tag_input.returnPressed.connect(self._add_tag)
+        self.tag_input.tag_submitted.connect(self._add_tag)
 
         # Tag list actions
         self.remove_tag_btn.clicked.connect(self._remove_selected_tags)
@@ -554,9 +681,23 @@ class CaptionTab(QWidget):
         save_sc = QShortcut(QKeySequence.StandardKey.Save, self)
         save_sc.activated.connect(self._save_all_captions)
 
-        # Ctrl+H for find & replace
-        fr_sc = QShortcut(QKeySequence('Ctrl+H'), self)
+        # Ctrl+R / Ctrl+H for find & replace
+        fr_sc = QShortcut(QKeySequence('Ctrl+R'), self)
         fr_sc.activated.connect(self._show_find_replace)
+        fr_sc2 = QShortcut(QKeySequence('Ctrl+H'), self)
+        fr_sc2.activated.connect(self._show_find_replace)
+
+        # Ctrl+D deduplicate all
+        dedup_sc = QShortcut(QKeySequence('Ctrl+D'), self)
+        dedup_sc.activated.connect(self._remove_duplicates_all)
+
+        # Ctrl+E remove empty tags
+        empty_sc = QShortcut(QKeySequence('Ctrl+E'), self)
+        empty_sc.activated.connect(self._remove_empty_all)
+
+        # Ctrl+B batch reorder
+        reorder_sc = QShortcut(QKeySequence('Ctrl+B'), self)
+        reorder_sc.activated.connect(self._show_batch_reorder)
 
     # ------------------------------------------------------------------
     # Settings persistence
@@ -596,6 +737,7 @@ class CaptionTab(QWidget):
     # ------------------------------------------------------------------
 
     def load_from_modify_tab(self, items: list[ImageItem]):
+        self._pixmap_cache.clear()
         self.model.load_items(items)
         for image in self.model.images:
             image.load_tags_from_file()
@@ -604,6 +746,7 @@ class CaptionTab(QWidget):
             self.image_list.select_index(0)
 
     def _load_directory(self, path: str):
+        self._pixmap_cache.clear()
         directory = Path(path)
         self.model.load_directory(directory)
 
@@ -630,18 +773,61 @@ class CaptionTab(QWidget):
         if image is None:
             return
 
-        # Show image
-        pixmap = load_pixmap(image.path)
-        if pixmap:
-            self.image_scene.clear()
-            self.image_scene.addPixmap(pixmap)
-            self.image_view.fitInView(
-                self.image_scene.sceneRect(),
-                Qt.AspectRatioMode.KeepAspectRatio)
+        pixmap = self._load_cached(image.path)
+        self.image_viewer.load_image(pixmap)
 
         # Show tags
         self.tags_list.set_tags(image.tags)
         self._update_token_count()
+        self._update_tag_highlights()
+
+        # Preload adjacent images after current frame finishes
+        QTimer.singleShot(0, lambda idx=index: self._preload_adjacent(idx))
+
+    def _preview_max_dim(self) -> int:
+        vp = self.image_viewer.viewport().size()
+        return max(vp.width(), vp.height(), 800) * 2
+
+    def _load_cached(self, path) -> object:
+        key = str(path)
+        if key in self._pixmap_cache:
+            self._pixmap_cache.move_to_end(key)
+            return self._pixmap_cache[key]
+        pixmap = load_pixmap_preview(path, self._preview_max_dim())
+        self._pixmap_cache[key] = pixmap
+        while len(self._pixmap_cache) > self._PIXMAP_CACHE_MAX:
+            self._pixmap_cache.popitem(last=False)
+        return pixmap
+
+    def _preload_adjacent(self, index: int):
+        if index != self._current_image_index:
+            return  # user already moved on
+        for offset in (-1, 1):
+            image = self.model.get_image(index + offset)
+            if image and str(image.path) not in self._pixmap_cache:
+                self._load_cached(image.path)
+
+    def _update_tag_highlights(self):
+        """Highlight tags in the Image Tags list that match the current filter."""
+        text = self.image_list.filter_input.text().strip()
+        if not text:
+            self.tags_list.set_highlight_patterns([])
+            return
+        proxy = self.image_list.proxy
+        tokens = proxy._tokenize(text)
+        patterns = []
+        for token in tokens:
+            if token.lower() in proxy._KEYWORDS:
+                continue
+            if token.startswith('-') and len(token) > 1:
+                token = token[1:]
+            if ':' in token:
+                key, _, value = token.partition(':')
+                if key.lower() == 'tag' and value:
+                    patterns.append(('tag', value))
+            else:
+                patterns.append(('text', token))
+        self.tags_list.set_highlight_patterns(patterns)
 
     def _save_current_tags(self):
         if self._current_image_index < 0:

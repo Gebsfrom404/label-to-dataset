@@ -9,8 +9,11 @@ def parse_yolo_line(line: str) -> Label | None:
     parts = line.strip().split()
     if len(parts) < 5:
         return None
-    class_id = int(parts[0])
-    values = [float(v) for v in parts[1:]]
+    try:
+        class_id = int(parts[0])
+        values = [float(v) for v in parts[1:]]
+    except ValueError:
+        return None  # not a YOLO label (e.g. caption text)
 
     if len(values) == 4:
         # Detection format: class cx cy w h

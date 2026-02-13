@@ -20,6 +20,24 @@ def load_pixmap(path: Path) -> QPixmap | None:
     return QPixmap.fromImage(image)
 
 
+def load_pixmap_preview(path: Path, max_dim: int = 1920) -> QPixmap | None:
+    """Load a pixmap, downscaling large images at decode time for speed."""
+    reader = QImageReader(str(path))
+    reader.setAutoTransform(True)
+    size = reader.size()
+    if not size.isValid():
+        return None
+    largest = max(size.width(), size.height())
+    if largest > max_dim:
+        scale = max_dim / largest
+        reader.setScaledSize(QSize(int(size.width() * scale),
+                                   int(size.height() * scale)))
+    image = reader.read()
+    if image.isNull():
+        return None
+    return QPixmap.fromImage(image)
+
+
 def generate_thumbnail(path: Path, width: int) -> QPixmap:
     """Generate a thumbnail with the given width, preserving aspect ratio."""
     reader = QImageReader(str(path))

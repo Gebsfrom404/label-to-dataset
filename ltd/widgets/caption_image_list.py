@@ -22,12 +22,16 @@ from ltd.data.image_list_model import ImageListModel
 class ImageFilterProxyModel(QSortFilterProxyModel):
     """Proxy model that filters images by a search expression.
 
-    Supported filter syntax (space-separated terms are ANDed):
-      - plain text     : matches filename or any tag (case-insensitive)
-      - tag:pattern    : any tag matches pattern (wildcard * and ?)
-      - name:pattern   : filename matches pattern
-      - path:pattern   : full path matches pattern
+    Syntax (space-separated terms are ANDed):
+      - plain text     : substring match on filename or any tag
+      - tag:pattern    : exact tag match (wildcards * ? for glob)
+      - name:pattern   : filename match (substring, or glob with *)
+      - path:pattern   : full path match
       - tags:>N        : tag count comparison (=, !=, <, >, <=, >=)
+      - or             : separate OR groups (any group matches)
+      - not / -        : negate the next term  (-tag:1boy, not tag:1boy)
+      - and            : explicit AND (implicit between terms, optional)
+      - "quoted text"  : preserves spaces in values
     """
 
     _OPS = {
@@ -36,15 +40,17 @@ class ImageFilterProxyModel(QSortFilterProxyModel):
         '<=': operator.le, '>=': operator.ge,
     }
     _NUM_RE = re.compile(r'^(==?|!=|<=?|>=?)(\d+)$')
+    _KEYWORDS = {'or', 'and', 'not'}
 
     def __init__(self, source_model: ImageListModel, parent=None):
         super().__init__(parent)
         self.setSourceModel(source_model)
-        self._filter_terms: list[tuple] = []  # parsed terms
+        # list of OR-groups; each group is list of (negated, term)
+        self._filter_groups: list[list[tuple]] = []
 
     def set_filter_text(self, text: str):
         raw = text.strip()
-        self._filter_terms = self._parse(raw) if raw else []
+        self._filter_groups = self._parse(raw) if raw else []
         self.invalidateFilter()
 
     # -- parsing --
@@ -73,30 +79,56 @@ class ImageFilterProxyModel(QSortFilterProxyModel):
             tokens.append(buf)
         return tokens
 
-    def _parse(self, text: str) -> list[tuple]:
-        terms = []
-        for token in self._tokenize(text):
-            if ':' in token:
-                key, _, value = token.partition(':')
-                key_lower = key.lower()
-                if key_lower == 'tag':
-                    terms.append(('tag', value))
-                elif key_lower == 'name':
-                    terms.append(('name', value))
-                elif key_lower == 'path':
-                    terms.append(('path', value))
-                elif key_lower == 'tags':
-                    m = self._NUM_RE.match(value)
-                    if m:
-                        terms.append(('tags_num', m.group(1), int(m.group(2))))
-                    else:
-                        # treat as plain text
-                        terms.append(('text', token))
-                else:
-                    terms.append(('text', token))
-            else:
-                terms.append(('text', token))
-        return terms
+    def _parse_term(self, token: str) -> tuple:
+        if ':' in token:
+            key, _, value = token.partition(':')
+            key_lower = key.lower()
+            if key_lower == 'tag':
+                return ('tag', value)
+            elif key_lower == 'name':
+                return ('name', value)
+            elif key_lower == 'path':
+                return ('path', value)
+            elif key_lower == 'tags':
+                m = self._NUM_RE.match(value)
+                if m:
+                    return ('tags_num', m.group(1), int(m.group(2)))
+        return ('text', token)
+
+    def _parse(self, text: str) -> list[list[tuple]]:
+        """Parse into OR-groups of AND-terms.
+
+        Returns list of groups.  Image matches if ANY group matches.
+        Within a group every (negated, term) must hold.
+        """
+        tokens = self._tokenize(text)
+        groups: list[list[tuple]] = [[]]
+        negate_next = False
+
+        for token in tokens:
+            low = token.lower()
+            if low == 'or':
+                if groups[-1]:
+                    groups.append([])
+                negate_next = False
+                continue
+            if low == 'and':
+                continue
+            if low == 'not':
+                negate_next = True
+                continue
+
+            negated = negate_next
+            negate_next = False
+
+            # - prefix negation
+            if token.startswith('-') and len(token) > 1:
+                negated = True
+                token = token[1:]
+
+            groups[-1].append((negated, self._parse_term(token)))
+
+        return [g for g in groups if g]
 
     # -- matching --
 
@@ -109,34 +141,47 @@ class ImageFilterProxyModel(QSortFilterProxyModel):
             return fnmatchcase(v, p)
         return p in v
 
-    def _image_matches(self, image: ImageItem) -> bool:
-        for term in self._filter_terms:
-            kind = term[0]
-            if kind == 'text':
-                needle = term[1].lower()
-                if needle not in image.filename.lower() and \
-                   not any(needle in t.lower() for t in image.tags):
-                    return False
-            elif kind == 'tag':
-                pattern = term[1]
-                if not any(self._wild(pattern, t) for t in image.tags):
-                    return False
-            elif kind == 'name':
-                if not self._wild(term[1], image.filename):
-                    return False
-            elif kind == 'path':
-                if not self._wild(term[1], str(image.path)):
-                    return False
-            elif kind == 'tags_num':
-                op_str, num = term[1], term[2]
-                op_fn = self._OPS.get(op_str)
-                if op_fn and not op_fn(len(image.tags), num):
-                    return False
+    def _term_matches(self, image: ImageItem, term: tuple) -> bool:
+        kind = term[0]
+        if kind == 'text':
+            needle = term[1].lower()
+            return (needle in image.filename.lower()
+                    or any(needle in t.lower() for t in image.tags))
+        elif kind == 'tag':
+            p = term[1].lower()
+            if '*' in p or '?' in p:
+                return any(fnmatchcase(t.lower(), p) for t in image.tags)
+            return any(t.strip().lower() == p for t in image.tags)
+        elif kind == 'name':
+            return self._wild(term[1], image.filename)
+        elif kind == 'path':
+            return self._wild(term[1], str(image.path))
+        elif kind == 'tags_num':
+            op_str, num = term[1], term[2]
+            op_fn = self._OPS.get(op_str)
+            return op_fn(len(image.tags), num) if op_fn else True
         return True
+
+    def _group_matches(self, image: ImageItem, group: list) -> bool:
+        """All terms in the group must hold (AND)."""
+        for negated, term in group:
+            result = self._term_matches(image, term)
+            if negated and result:
+                return False
+            if not negated and not result:
+                return False
+        return True
+
+    def _image_matches(self, image: ImageItem) -> bool:
+        """Any group matching is enough (OR across groups)."""
+        for group in self._filter_groups:
+            if self._group_matches(image, group):
+                return True
+        return False
 
     def filterAcceptsRow(self, source_row: int,
                          source_parent: QModelIndex) -> bool:
-        if not self._filter_terms:
+        if not self._filter_groups:
             return True
         source = self.sourceModel()
         image = source.data(source.index(source_row, 0),
@@ -176,7 +221,7 @@ class CaptionImageList(QWidget):
         # Filter bar
         self.filter_input = QLineEdit()
         self.filter_input.setPlaceholderText(
-            'Filter: text, tag:*, name:*, tags:>N')
+            'Filter: tag:x, name:*, tags:>N, or, not/-')
         self.filter_input.setClearButtonEnabled(True)
         layout.addWidget(self.filter_input)
 

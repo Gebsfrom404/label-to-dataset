@@ -1,8 +1,9 @@
 """Modify tab: image modification with before/after comparison."""
 import shutil
+from collections import OrderedDict
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (QFileDialog, QGroupBox, QHBoxLayout, QLabel,
                                QMessageBox, QProgressBar, QPushButton,
@@ -12,7 +13,7 @@ from ltd.data.image_item import ImageItem
 from ltd.data.image_list_model import IMAGE_EXTENSIONS, ImageListModel
 from ltd.data.label_data import DEFAULT_COLORS
 from ltd.utils.file_utils import get_temp_dir
-from ltd.utils.image_utils import load_pixmap
+from ltd.utils.image_utils import load_pixmap_preview
 from ltd.widgets.comparison_slider import ComparisonSlider
 from ltd.widgets.image_list_widget import ImageListWidget
 from ltd.widgets.module_selector import ModuleSelector
@@ -25,12 +26,15 @@ from modules import discover_modules
 class ModifyTab(QWidget):
     copy_to_caption_requested = Signal(list)  # list[ImageItem]
 
+    _PIXMAP_CACHE_MAX = 5
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.model = ImageListModel()
         self._current_image_index = -1
         self._worker: ModificationWorker | None = None
         self._class_colors: list[str] = list(DEFAULT_COLORS)
+        self._pixmap_cache: OrderedDict[str, object] = OrderedDict()
 
         # Discover modification modules
         self._modification_modules = discover_modules(
@@ -132,6 +136,7 @@ class ModifyTab(QWidget):
     def load_from_label_tab(self, items: list[ImageItem],
                            colors: list[str] | None = None):
         """Load images with masks from the label tab."""
+        self._pixmap_cache.clear()
         if colors:
             self._class_colors = colors
         self.model.load_items(items)
@@ -140,6 +145,7 @@ class ModifyTab(QWidget):
 
     def _load_directory(self, path: str):
         """Load a directory, detecting -masklabel pairs."""
+        self._pixmap_cache.clear()
         directory = Path(path)
         self.model.load_directory(directory)
 
@@ -166,17 +172,42 @@ class ModifyTab(QWidget):
         # After: modified image (if exists) or original
         after_pixmap = None
         if image.modified_path and image.modified_path.exists():
-            after_pixmap = load_pixmap(image.modified_path)
+            after_pixmap = self._load_cached(image.modified_path)
         if after_pixmap is None:
-            after_pixmap = load_pixmap(image.path)
+            after_pixmap = self._load_cached(image.path)
         if after_pixmap:
             self.comparison.set_after(after_pixmap)
+
+        QTimer.singleShot(0, lambda idx=index: self._preload_adjacent(idx))
+
+    def _preview_max_dim(self) -> int:
+        vp = self.comparison.viewport().size()
+        return max(vp.width(), vp.height(), 800) * 2
+
+    def _load_cached(self, path):
+        key = str(path)
+        if key in self._pixmap_cache:
+            self._pixmap_cache.move_to_end(key)
+            return self._pixmap_cache[key]
+        pixmap = load_pixmap_preview(path, self._preview_max_dim())
+        self._pixmap_cache[key] = pixmap
+        while len(self._pixmap_cache) > self._PIXMAP_CACHE_MAX:
+            self._pixmap_cache.popitem(last=False)
+        return pixmap
+
+    def _preload_adjacent(self, index: int):
+        if index != self._current_image_index:
+            return
+        for offset in (-1, 1):
+            image = self.model.get_image(index + offset)
+            if image and str(image.path) not in self._pixmap_cache:
+                self._load_cached(image.path)
 
     def _create_before_pixmap(self, image: ImageItem) -> QPixmap | None:
         """Create before image with label overlays (matching Label tab look)."""
         from PySide6.QtCore import QPointF, QRectF
         from PySide6.QtGui import (QBrush, QColor, QPainter, QPen, QPolygonF)
-        pixmap = load_pixmap(image.path)
+        pixmap = self._load_cached(image.path)
         if pixmap is None:
             return None
 
