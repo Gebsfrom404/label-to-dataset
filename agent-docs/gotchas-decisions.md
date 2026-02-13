@@ -1,0 +1,54 @@
+# Gotchas & Past Decisions
+
+## QImage Row Padding
+
+QImage rows are padded to 4-byte alignment. Always use `bytesPerLine()` when converting to numpy:
+```python
+bpl = qimage.bytesPerLine()
+arr = np.frombuffer(ptr, dtype=np.uint8).reshape((height, bpl))[:, :width].copy()
+```
+Without this: `ValueError: cannot reshape array` on images where `width % 4 != 0`.
+
+## Brush Tearing on Fast Movement
+
+`mouseMoveEvent` fires at discrete intervals. Drawing circles at each position leaves gaps. Fix: use `QPainter.drawLine()` with `RoundCap` between consecutive positions.
+
+## Mask Overlay Update Throttling
+
+Rebuilding the numpy mask overlay on every stroke is expensive. Throttle to every 6 strokes during drawing, then final update on mouse release.
+
+## Slow Image Switching
+
+Don't call `_update_mask_overlay_fast()` when loading a new image — the mask buffer starts empty, so the overlay rebuild is wasted work.
+
+## Label Persistence Across Sessions
+
+Two requirements:
+1. `get_temp_dir_no_clear()` (not `get_temp_dir()`) for label storage — otherwise contents cleared on every folder load
+2. `cleanup_all_temp()` must skip `labels_*` directories — otherwise labels lost on app exit
+
+Temp dir keyed by MD5 hash of source directory path for stability.
+
+## Labels in Temp Dir, Not In-Place
+
+Labels stored in temp folder to avoid filename collision with caption `.txt` files. Both use `{imagename}.txt` pattern but different content.
+
+## Comparison Slider Direction
+
+Before image on top (Z=1), clipped from left edge. `slider_pos` 0.0 = all after (modified), 1.0 = all before (original). After image sits as base layer.
+
+## WD Tagger: BGR Not RGB
+
+SmilingWolf models trained on OpenCV BGR input. Omitting the channel flip produces wrong color-related tags. The `[::-1]` flip creates a negative stride — must `.copy()` before `torch.from_numpy()`.
+
+## WD Tagger: Must Normalize
+
+Input must be normalized to `[-1, 1]` via `(pixel/255 - 0.5) / 0.5`. Passing raw `[0, 255]` or `[0, 1]` produces irrelevant tags.
+
+## Module `prepare()` for Thread Safety
+
+Plugin modules have Qt widget settings panels. These widgets cannot be accessed from worker threads. The `prepare()` method runs on the GUI thread before work starts — read all widget values into plain attributes there.
+
+## Spacebar Pan
+
+Canvas needs `StrongFocus` policy and `keyPressEvent`/`keyReleaseEvent` handlers. The label tab must call `canvas.setFocus()` after image switching so spacebar works immediately.
