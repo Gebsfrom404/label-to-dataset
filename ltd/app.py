@@ -34,7 +34,31 @@ def _dark_palette() -> QPalette:
 
 
 def _light_palette() -> QPalette:
-    return QApplication.style().standardPalette()
+    p = QPalette()
+    p.setColor(QPalette.ColorRole.Window, QColor(240, 240, 240))
+    p.setColor(QPalette.ColorRole.WindowText, QColor(20, 20, 20))
+    p.setColor(QPalette.ColorRole.Base, QColor(255, 255, 255))
+    p.setColor(QPalette.ColorRole.AlternateBase, QColor(245, 245, 245))
+    p.setColor(QPalette.ColorRole.ToolTipBase, QColor(255, 255, 220))
+    p.setColor(QPalette.ColorRole.ToolTipText, QColor(20, 20, 20))
+    p.setColor(QPalette.ColorRole.Text, QColor(20, 20, 20))
+    p.setColor(QPalette.ColorRole.Button, QColor(228, 228, 228))
+    p.setColor(QPalette.ColorRole.ButtonText, QColor(20, 20, 20))
+    p.setColor(QPalette.ColorRole.BrightText, Qt.GlobalColor.red)
+    p.setColor(QPalette.ColorRole.Link, QColor(0, 102, 204))
+    p.setColor(QPalette.ColorRole.Highlight, QColor(51, 140, 230))
+    p.setColor(QPalette.ColorRole.HighlightedText, Qt.GlobalColor.white)
+    p.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.WindowText,
+               QColor(160, 160, 160))
+    p.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text,
+               QColor(160, 160, 160))
+    p.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText,
+               QColor(160, 160, 160))
+    p.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Highlight,
+               QColor(200, 200, 200))
+    p.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.HighlightedText,
+               QColor(160, 160, 160))
+    return p
 
 
 def create_application() -> QApplication:
