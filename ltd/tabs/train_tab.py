@@ -9,12 +9,20 @@ from PySide6.QtWidgets import (QComboBox, QFileDialog, QGroupBox, QHBoxLayout,
 
 from ltd.workers.training_worker import TrainingWorker
 
-YOLO_MODELS = {
+YOLO_DETECT_MODELS = {
     'YOLO26n': 'yolo26n.pt',
     'YOLO26s': 'yolo26s.pt',
     'YOLO26m': 'yolo26m.pt',
     'YOLO26l': 'yolo26l.pt',
     'YOLO26x': 'yolo26x.pt',
+}
+
+YOLO_SEG_MODELS = {
+    'YOLO26n-seg': 'yolo26n-seg.pt',
+    'YOLO26s-seg': 'yolo26s-seg.pt',
+    'YOLO26m-seg': 'yolo26m-seg.pt',
+    'YOLO26l-seg': 'yolo26l-seg.pt',
+    'YOLO26x-seg': 'yolo26x-seg.pt',
 }
 
 
@@ -114,6 +122,7 @@ class TrainTab(QWidget):
     def _connect_signals(self):
         self.browse_dataset_btn.clicked.connect(self._browse_dataset)
         self.refresh_models_btn.clicked.connect(self._populate_models)
+        self.model_type_combo.currentIndexChanged.connect(self._populate_models)
         self.split_slider.valueChanged.connect(
             lambda v: self.split_label.setText(f'{v}%'))
         self.start_btn.clicked.connect(self._start_training)
@@ -122,9 +131,11 @@ class TrainTab(QWidget):
     def _populate_models(self):
         self.base_model_combo.clear()
 
-        # YOLO26 pre-defined models
-        for name in YOLO_MODELS:
-            self.base_model_combo.addItem(name, YOLO_MODELS[name])
+        # Pick detect vs segmentation preset models
+        is_seg = self.model_type_combo.currentIndex() == 1
+        preset = YOLO_SEG_MODELS if is_seg else YOLO_DETECT_MODELS
+        for name, path in preset.items():
+            self.base_model_combo.addItem(name, path)
 
         # Custom models from ./models/yolo/
         models_dir = Path('./models/yolo')
