@@ -9,12 +9,12 @@ from PySide6.QtWidgets import (QComboBox, QFileDialog, QGroupBox, QHBoxLayout,
 
 from ltd.workers.training_worker import TrainingWorker
 
-YOLO11_MODELS = {
-    'YOLO11n': 'yolo11n.pt',
-    'YOLO11s': 'yolo11s.pt',
-    'YOLO11m': 'yolo11m.pt',
-    'YOLO11l': 'yolo11l.pt',
-    'YOLO11x': 'yolo11x.pt',
+YOLO_MODELS = {
+    'YOLO26n': 'yolo26n.pt',
+    'YOLO26s': 'yolo26s.pt',
+    'YOLO26m': 'yolo26m.pt',
+    'YOLO26l': 'yolo26l.pt',
+    'YOLO26x': 'yolo26x.pt',
 }
 
 
@@ -122,9 +122,9 @@ class TrainTab(QWidget):
     def _populate_models(self):
         self.base_model_combo.clear()
 
-        # YOLO11 pre-defined models
-        for name in YOLO11_MODELS:
-            self.base_model_combo.addItem(name, YOLO11_MODELS[name])
+        # YOLO26 pre-defined models
+        for name in YOLO_MODELS:
+            self.base_model_combo.addItem(name, YOLO_MODELS[name])
 
         # Custom models from ./models/yolo/
         models_dir = Path('./models/yolo')
