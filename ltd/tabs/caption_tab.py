@@ -9,13 +9,14 @@ from pathlib import Path
 import numpy as np
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QKeySequence, QPainter, QShortcut
-from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QCompleter,
-                               QDialog, QDoubleSpinBox, QGraphicsScene,
-                               QGraphicsView, QGroupBox, QHBoxLayout, QLabel,
-                               QLineEdit, QListWidget, QListWidgetItem,
-                               QFileDialog, QMessageBox, QProgressBar,
-                               QPushButton, QSpinBox, QSplitter, QTabWidget,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox,
+                               QCompleter, QDialog, QDoubleSpinBox,
+                               QGraphicsScene, QGraphicsView, QGroupBox,
+                               QHBoxLayout, QLabel, QLineEdit, QListWidget,
+                               QListWidgetItem, QFileDialog, QMenu,
+                               QMessageBox, QProgressBar, QPushButton,
+                               QSpinBox, QSplitter, QTabWidget, QVBoxLayout,
+                               QWidget)
 
 from ltd.comfyui.client import ComfyUIClient
 from ltd.comfyui.workflow import (load_workflow, validate_caption_workflow,
@@ -28,6 +29,7 @@ from ltd.dialogs.find_replace_dialog import FindReplaceDialog
 from ltd.utils.file_utils import get_temp_dir
 from ltd.utils.image_utils import load_pixmap_preview
 from ltd.widgets.caption_image_list import CaptionImageList
+from ltd.widgets.loading_dialog import loading_dialog
 from ltd.widgets.workflow_selector import WorkflowSelector
 from ltd.workers.caption_worker import CaptionWorker
 
@@ -281,13 +283,53 @@ class EditableTagsList(QListWidget):
 # ---------------------------------------------------------------------------
 
 class AllTagsList(QListWidget):
-    """All-tags list with delete key support."""
+    """All-tags list with delete key, right-click context menu."""
     delete_tags_requested = Signal(list)  # list of tag names
+    add_to_image_requested = Signal(str)  # single tag name
+    filter_by_tag_requested = Signal(str)  # single tag name
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setSelectionMode(
             QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._show_context_menu)
+
+    def _get_tag_at(self, item):
+        """Extract tag name from display text like 'tag (5)'."""
+        text = item.text()
+        return text.rsplit(' (', 1)[0] if ' (' in text else text
+
+    def _show_context_menu(self, pos):
+        item = self.itemAt(pos)
+        if item is None:
+            return
+        tag = self._get_tag_at(item)
+
+        menu = QMenu(self)
+        act_add = menu.addAction(f'Add "{tag}" to image')
+        act_filter = menu.addAction(f'Filter images by "{tag}"')
+        menu.addSeparator()
+        selected = self.selectedIndexes()
+        if len(selected) > 1:
+            tags = [self._get_tag_at(self.item(idx.row()))
+                    for idx in selected]
+            act_delete = menu.addAction(
+                f'Delete {len(tags)} tags from all images')
+        else:
+            act_delete = menu.addAction(
+                f'Delete "{tag}" from all images')
+
+        action = menu.exec(self.mapToGlobal(pos))
+        if action == act_add:
+            self.add_to_image_requested.emit(tag)
+        elif action == act_filter:
+            self.filter_by_tag_requested.emit(tag)
+        elif action == act_delete:
+            if len(selected) > 1:
+                self.delete_tags_requested.emit(tags)
+            else:
+                self.delete_tags_requested.emit([tag])
 
     def keyPressEvent(self, event):
         if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
@@ -485,13 +527,6 @@ class CaptionTab(QWidget):
         sort_layout.addWidget(self.sort_order_combo)
         all_tags_layout.addLayout(sort_layout)
 
-        action_layout = QHBoxLayout()
-        action_layout.addWidget(QLabel('Click:'))
-        self.click_action_combo = QComboBox()
-        self.click_action_combo.addItems(['Add to image', 'Filter images'])
-        action_layout.addWidget(self.click_action_combo)
-        all_tags_layout.addLayout(action_layout)
-
         self.all_tags_list = AllTagsList()
         all_tags_layout.addWidget(self.all_tags_list)
 
@@ -635,6 +670,8 @@ class CaptionTab(QWidget):
         # Tag input
         self.add_tag_btn.clicked.connect(self._add_tag)
         self.tag_input.tag_submitted.connect(self._add_tag)
+        self.tag_completer.activated.connect(
+            lambda: QTimer.singleShot(0, self._add_tag))
 
         # Tag list actions
         self.remove_tag_btn.clicked.connect(self._remove_selected_tags)
@@ -648,9 +685,12 @@ class CaptionTab(QWidget):
             self._update_all_tags_display)
         self.sort_order_combo.currentIndexChanged.connect(
             self._update_all_tags_display)
-        self.all_tags_list.itemClicked.connect(self._on_all_tag_clicked)
         self.all_tags_list.itemDoubleClicked.connect(
             self._on_all_tag_double_clicked)
+        self.all_tags_list.add_to_image_requested.connect(
+            self._add_tag_to_image)
+        self.all_tags_list.filter_by_tag_requested.connect(
+            self._filter_by_tag)
         self.all_tags_list.delete_tags_requested.connect(
             self._delete_tags_from_all_images)
 
@@ -746,19 +786,24 @@ class CaptionTab(QWidget):
             self.image_list.select_index(0)
 
     def _load_directory(self, path: str):
-        self._pixmap_cache.clear()
         directory = Path(path)
-        self.model.load_directory(directory)
 
-        # Filter out mask files
-        self.model.images = [
-            img for img in self.model.images
-            if '-masklabel' not in img.name and '-mask' not in img.name
-        ]
+        with loading_dialog('Loading images...', self) as dlg:
+            self._pixmap_cache.clear()
+            self.model.load_directory(directory)
 
-        for image in self.model.images:
-            image.load_tags_from_file()
-        self._rebuild_all_tags()
+            # Filter out mask files
+            self.model.images = [
+                img for img in self.model.images
+                if '-masklabel' not in img.name and '-mask' not in img.name
+            ]
+
+            dlg.set_message('Loading tags...')
+            QApplication.processEvents()
+            for image in self.model.images:
+                image.load_tags_from_file()
+            self._rebuild_all_tags()
+
         if self.model.rowCount() > 0:
             self.image_list.select_index(0)
 
@@ -997,16 +1042,17 @@ class CaptionTab(QWidget):
         else:
             self.all_tags_count_label.setText(f'{total} tags')
 
-    def _on_all_tag_clicked(self, item: QListWidgetItem):
-        tag = item.text().rsplit(' (', 1)[0]
-        action = self.click_action_combo.currentIndex()
-        if action == 0:  # Add to image
-            new_item = QListWidgetItem(tag)
-            new_item.setFlags(new_item.flags() | Qt.ItemFlag.ItemIsEditable)
-            self.tags_list.addItem(new_item)
-            self.tags_list.scrollToBottom()
-            self._on_tags_list_changed()
-        elif action == 1:  # Filter images (use image list filter bar)
+    def _add_tag_to_image(self, tag: str):
+        new_item = QListWidgetItem(tag)
+        new_item.setFlags(new_item.flags() | Qt.ItemFlag.ItemIsEditable)
+        self.tags_list.addItem(new_item)
+        self.tags_list.scrollToBottom()
+        self._on_tags_list_changed()
+
+    def _filter_by_tag(self, tag: str):
+        if ' ' in tag:
+            self.image_list.filter_input.setText(f'tag:"{tag}"')
+        else:
             self.image_list.filter_input.setText(f'tag:{tag}')
 
     def _on_all_tag_double_clicked(self, item: QListWidgetItem):

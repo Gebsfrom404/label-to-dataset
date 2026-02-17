@@ -16,6 +16,31 @@ from ltd.data.image_list_model import ImageListModel
 
 
 # ---------------------------------------------------------------------------
+# List view with W/S navigation
+# ---------------------------------------------------------------------------
+
+class NavigableListView(QListView):
+    """QListView that also navigates with W (up) and S (down) keys."""
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_W:
+            current = self.currentIndex()
+            if current.isValid() and current.row() > 0:
+                new_idx = self.model().index(current.row() - 1, 0)
+                self.setCurrentIndex(new_idx)
+            event.accept()
+            return
+        if event.key() == Qt.Key.Key_S:
+            current = self.currentIndex()
+            if current.isValid() and current.row() < self.model().rowCount() - 1:
+                new_idx = self.model().index(current.row() + 1, 0)
+                self.setCurrentIndex(new_idx)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
+# ---------------------------------------------------------------------------
 # Filter proxy model
 # ---------------------------------------------------------------------------
 
@@ -226,7 +251,7 @@ class CaptionImageList(QWidget):
         layout.addWidget(self.filter_input)
 
         # List view with proxy model
-        self.list_view = QListView()
+        self.list_view = NavigableListView()
         self.list_view.setModel(self.proxy)
         self.list_view.setViewMode(QListView.ViewMode.ListMode)
         self.list_view.setIconSize(QSize(160, 90))

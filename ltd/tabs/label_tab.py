@@ -7,11 +7,12 @@ from pathlib import Path
 
 from PySide6.QtCore import QModelIndex, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPixmap, QShortcut, QKeySequence
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QGroupBox,
-                               QHBoxLayout, QLabel, QListWidget,
-                               QListWidgetItem, QMessageBox, QProgressBar,
-                               QPushButton, QSpinBox, QSplitter, QToolButton,
-                               QVBoxLayout, QWidget, QButtonGroup, QLineEdit)
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox,
+                               QFileDialog, QGroupBox, QHBoxLayout, QLabel,
+                               QListWidget, QListWidgetItem, QMessageBox,
+                               QProgressBar, QPushButton, QSpinBox, QSplitter,
+                               QToolButton, QVBoxLayout, QWidget,
+                               QButtonGroup, QLineEdit)
 
 from ltd.data.image_item import ImageItem
 from ltd.data.image_list_model import ImageListModel
@@ -26,7 +27,8 @@ from ltd.utils.mask_utils import (bbox_to_mask, create_empty_mask,
                                    merge_masks, polygon_to_mask, save_mask)
 from ltd.utils.yolo_format import read_yolo_labels, write_yolo_labels
 from ltd.widgets.canvas_widget import CanvasWidget, Tool
-from ltd.widgets.image_list_widget import ImageListWidget
+from ltd.widgets.label_image_list import LabelImageList
+from ltd.widgets.loading_dialog import loading_dialog
 from ltd.widgets.module_selector import ModuleSelector
 from ltd.workers.detection_worker import DetectionWorker
 
@@ -69,7 +71,7 @@ class LabelTab(QWidget):
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
         # --- Left: Image list ---
-        self.image_list = ImageListWidget(self.model)
+        self.image_list = LabelImageList(self.model)
         splitter.addWidget(self.image_list)
 
         # --- Center: Canvas ---
@@ -297,27 +299,34 @@ class LabelTab(QWidget):
                 self.classes_list.addItem(item)
         if self.classes:
             self.classes_list.setCurrentRow(0)
+        self.image_list.update_class_names(self.classes)
 
     def _load_directory(self, path: str):
         import hashlib
-        self._pixmap_cache.clear()
         directory = Path(path)
-        self.model.load_directory(directory)
 
-        # Stable per-directory temp labels dir (survives app restarts)
-        dir_hash = hashlib.md5(str(directory.resolve()).encode()).hexdigest()[:12]
-        self._labels_dir = get_temp_dir_no_clear(f'labels_{dir_hash}')
+        with loading_dialog('Loading images...', self) as dlg:
+            self._pixmap_cache.clear()
+            self.model.load_directory(directory)
 
-        for image in self.model.images:
-            # Prefer temp labels (previous session), fall back to in-place
-            temp_txt = self._label_path_for(image)
-            inplace_txt = image.path.with_suffix('.txt')
-            if temp_txt.exists():
-                image.labels = read_yolo_labels(temp_txt)
-            elif inplace_txt.exists():
-                image.labels = read_yolo_labels(inplace_txt)
+            # Stable per-directory temp labels dir (survives app restarts)
+            dir_hash = hashlib.md5(
+                str(directory.resolve()).encode()).hexdigest()[:12]
+            self._labels_dir = get_temp_dir_no_clear(f'labels_{dir_hash}')
 
-        self._undo_stacks.clear()
+            dlg.set_message('Loading labels...')
+            QApplication.processEvents()
+            for image in self.model.images:
+                # Prefer temp labels (previous session), fall back to in-place
+                temp_txt = self._label_path_for(image)
+                inplace_txt = image.path.with_suffix('.txt')
+                if temp_txt.exists():
+                    image.labels = read_yolo_labels(temp_txt)
+                elif inplace_txt.exists():
+                    image.labels = read_yolo_labels(inplace_txt)
+
+            self._undo_stacks.clear()
+
         if self.model.rowCount() > 0:
             self.image_list.select_index(0)
 
@@ -374,6 +383,7 @@ class LabelTab(QWidget):
         if image is None or self._labels_dir is None:
             return
         write_yolo_labels(self._label_path_for(image), image.labels)
+        self.image_list.reapply_filter()
 
     def _push_undo(self):
         """Snapshot current image's labels before a mutation."""
@@ -459,6 +469,7 @@ class LabelTab(QWidget):
         self.class_name_input.clear()
         self.classes_list.setCurrentRow(class_id)
         self._save_classes()
+        self.image_list.update_class_names(self.classes)
 
     def _remove_class(self):
         row = self.classes_list.currentRow()
@@ -494,6 +505,7 @@ class LabelTab(QWidget):
             self.canvas.display_labels(image.labels, colors)
 
         self._save_classes()
+        self.image_list.update_class_names(self.classes)
 
     def _on_class_selected(self, row: int):
         if 0 <= row < len(self.classes):
@@ -772,6 +784,7 @@ class LabelTab(QWidget):
         self.auto_label_btn.setEnabled(True)
         self.auto_label_current_btn.setEnabled(True)
         self._worker = None
+        self.image_list.reapply_filter()
 
     def _on_detection_error(self, msg):
         QMessageBox.critical(self, 'Detection Error', msg)

@@ -16,6 +16,7 @@ from ltd.utils.file_utils import get_temp_dir
 from ltd.utils.image_utils import load_pixmap_preview
 from ltd.widgets.comparison_slider import ComparisonSlider
 from ltd.widgets.image_list_widget import ImageListWidget
+from ltd.widgets.loading_dialog import loading_dialog
 from ltd.widgets.module_selector import ModuleSelector
 from ltd.workers.modification_worker import ModificationWorker
 
@@ -145,15 +146,18 @@ class ModifyTab(QWidget):
 
     def _load_directory(self, path: str):
         """Load a directory, detecting -masklabel pairs."""
-        self._pixmap_cache.clear()
         directory = Path(path)
-        self.model.load_directory(directory)
 
-        # Detect mask pairs: imagename-masklabel.png
-        for image in self.model.images:
-            mask_path = image.path.parent / f'{image.name}-masklabel.png'
-            if mask_path.exists():
-                image.mask_path = mask_path
+        with loading_dialog('Loading images...', self):
+            self._pixmap_cache.clear()
+            self.model.load_directory(directory)
+
+            # Detect mask pairs: imagename-masklabel.png
+            for image in self.model.images:
+                mask_path = image.path.parent / f'{image.name}-masklabel.png'
+                if mask_path.exists():
+                    image.mask_path = mask_path
+
 
         if self.model.rowCount() > 0:
             self.image_list.select_index(0)

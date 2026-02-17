@@ -491,8 +491,27 @@ class CanvasWidget(QGraphicsView):
                 and self._space_held):
             self._space_held = False
             if self._tool_before_space is not None:
-                self.current_tool = self._tool_before_space
+                # Restore tool without going through setter to preserve
+                # in-progress polygon drawing
+                tool = self._tool_before_space
+                self._current_tool = tool
                 self._tool_before_space = None
+                self._update_brush_cursor_visibility()
+                if tool == Tool.HAND:
+                    self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+                    self.setCursor(Qt.CursorShape.OpenHandCursor)
+                elif tool == Tool.POLYGON:
+                    self.setDragMode(QGraphicsView.DragMode.NoDrag)
+                    self.setCursor(Qt.CursorShape.CrossCursor)
+                elif tool == Tool.BBOX:
+                    self.setDragMode(QGraphicsView.DragMode.NoDrag)
+                    self.setCursor(Qt.CursorShape.CrossCursor)
+                elif tool == Tool.POINTER:
+                    self.setDragMode(QGraphicsView.DragMode.NoDrag)
+                    self.setCursor(Qt.CursorShape.ArrowCursor)
+                elif tool in _BRUSH_TOOLS:
+                    self.setDragMode(QGraphicsView.DragMode.NoDrag)
+                    self.setCursor(Qt.CursorShape.BlankCursor)
             event.accept()
             return
         super().keyReleaseEvent(event)

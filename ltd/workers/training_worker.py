@@ -80,23 +80,35 @@ class TrainingWorker(BaseWorker):
         try:
             model = YOLO(str(model_file))
 
+            # Register callback to check cancellation after each epoch
+            def _check_cancel(trainer):
+                if self.is_cancelled:
+                    raise KeyboardInterrupt("Training cancelled by user")
+
+            model.add_callback('on_train_epoch_end', _check_cancel)
+
             task = self.model_type
             project_dir = str(self.dataset_path / 'runs' / task)
 
-            results = model.train(
-                data=str(data_yaml_path),
-                epochs=500,
-                patience=100,
-                batch=-1,
-                imgsz=640,
-                device=device,
-                cache='disk',
-                deterministic=False,
-                name=self.model_name,
-                project=project_dir,
-                exist_ok=True,
-                verbose=True,
-            )
+            try:
+                results = model.train(
+                    data=str(data_yaml_path),
+                    epochs=500,
+                    patience=100,
+                    batch=0.9,
+                    imgsz=640,
+                    device=device,
+                    cache='disk',
+                    deterministic=False,
+                    name=self.model_name,
+                    project=project_dir,
+                    exist_ok=True,
+                    verbose=True,
+                    amp=True,
+                )
+            except KeyboardInterrupt:
+                self.status.emit('Training cancelled.')
+                return
         finally:
             os.chdir(old_cwd)
 
