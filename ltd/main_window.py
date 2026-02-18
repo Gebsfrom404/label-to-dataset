@@ -8,6 +8,7 @@ from ltd.tabs.label_tab import LabelTab
 from ltd.tabs.modify_tab import ModifyTab
 from ltd.tabs.caption_tab import CaptionTab
 from ltd.tabs.train_tab import TrainTab
+from ltd.tabs.extras_tab import ExtrasTab
 from ltd.utils.file_utils import cleanup_all_temp
 from ltd.widgets.toolbar_widget import ToolbarWidget
 
@@ -32,11 +33,13 @@ class MainWindow(QMainWindow):
         self.modify_tab = ModifyTab(self)
         self.caption_tab = CaptionTab(self)
         self.train_tab = TrainTab(self)
+        self.extras_tab = ExtrasTab(self)
 
         self.tab_widget.addTab(self.label_tab, 'Label')
         self.tab_widget.addTab(self.modify_tab, 'Modify')
         self.tab_widget.addTab(self.caption_tab, 'Caption')
         self.tab_widget.addTab(self.train_tab, 'Train YOLO')
+        self.tab_widget.addTab(self.extras_tab, 'Extras')
 
         # Connect toolbar signals
         self.toolbar.theme_changed.connect(self._on_theme_changed)
