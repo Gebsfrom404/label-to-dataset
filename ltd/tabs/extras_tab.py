@@ -4,10 +4,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal, QThread
 from PySide6.QtWidgets import (
     QCheckBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
-    QPushButton, QScrollArea, QVBoxLayout, QWidget,
+    QProgressBar, QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
 from ltd.settings import get_settings
@@ -19,6 +19,41 @@ EXTRAS_DIR = Path(__file__).resolve().parents[2] / 'extras_scripts'
 
 REQUIRED_PARAM_KEYS = {'name', 'type', 'label', 'default'}
 VALID_PARAM_TYPES = {'str', 'bool', 'folder'}
+
+
+class _ScriptWorker(QThread):
+    """Worker thread for running Python-based extras scripts."""
+    progress = Signal(int, int)  # current, total
+    status = Signal(str)
+    error = Signal(str)
+    finished_work = Signal()
+
+    def __init__(self, run_func, params: dict, parent=None):
+        super().__init__(parent)
+        self._run_func = run_func
+        self._params = params
+        self._is_cancelled = False
+
+    def cancel(self):
+        self._is_cancelled = True
+
+    @property
+    def is_cancelled(self) -> bool:
+        return self._is_cancelled
+
+    def _progress_callback(self, current: int, total: int, message: str = ''):
+        self.progress.emit(current, total)
+        if message:
+            self.status.emit(message)
+
+    def run(self):
+        try:
+            self._is_cancelled = False
+            self._run_func(self._params, self._progress_callback)
+        except Exception as e:
+            self.error.emit(str(e))
+        finally:
+            self.finished_work.emit()
 
 
 def _validate_script_info(info: dict) -> bool:
@@ -57,8 +92,11 @@ def _load_script(path: Path):
     if not callable(getattr(mod, 'check_available', None)):
         logger.warning('Missing check_available() in %s', path.name)
         return None
-    if not callable(getattr(mod, 'build_command', None)):
-        logger.warning('Missing build_command() in %s', path.name)
+
+    has_build = callable(getattr(mod, 'build_command', None))
+    has_run = callable(getattr(mod, 'run', None))
+    if not has_build and not has_run:
+        logger.warning('Missing build_command() or run() in %s', path.name)
         return None
 
     return mod
@@ -167,6 +205,19 @@ class ExtrasTab(QWidget):
             desc_label.setWordWrap(True)
             panel.content_layout.addWidget(desc_label)
 
+        # Progress bar and status (for run()-based scripts)
+        is_python_script = callable(getattr(mod, 'run', None))
+        progress_bar = None
+        status_label = None
+        if is_python_script:
+            progress_bar = QProgressBar()
+            progress_bar.setVisible(False)
+            panel.content_layout.addWidget(progress_bar)
+            status_label = QLabel()
+            status_label.setStyleSheet('font-size: 11px;')
+            status_label.setVisible(False)
+            panel.content_layout.addWidget(status_label)
+
         # Execute button
         exec_btn = QPushButton('Execute')
         exec_btn.clicked.connect(
@@ -176,15 +227,18 @@ class ExtrasTab(QWidget):
         panel.content_layout.addWidget(exec_btn)
 
         self._container_layout.addWidget(panel)
-        self._scripts.append({'mod': mod, 'panel': panel, 'widgets': param_widgets})
+        self._scripts.append({
+            'mod': mod, 'panel': panel, 'widgets': param_widgets,
+            'exec_btn': exec_btn, 'progress_bar': progress_bar,
+            'status_label': status_label, 'worker': None,
+        })
 
     def _browse_folder(self, line_edit: QLineEdit):
         folder = QFileDialog.getExistingDirectory(self, 'Select Folder', line_edit.text())
         if folder:
             line_edit.setText(folder)
 
-    def _execute(self, mod, param_widgets: dict, params_info: list):
-        """Collect parameter values, build command, spawn in new terminal."""
+    def _collect_values(self, param_widgets: dict, params_info: list) -> dict:
         values = {}
         for p in params_info:
             name = p['name']
@@ -193,7 +247,72 @@ class ExtrasTab(QWidget):
                 values[name] = widget.isChecked()
             else:
                 values[name] = widget.text()
+        return values
 
+    def _find_script_entry(self, mod) -> dict | None:
+        for entry in self._scripts:
+            if entry['mod'] is mod:
+                return entry
+        return None
+
+    def _execute(self, mod, param_widgets: dict, params_info: list):
+        """Execute script: run() in-process on thread, or build_command() in terminal."""
+        values = self._collect_values(param_widgets, params_info)
+
+        if callable(getattr(mod, 'run', None)):
+            self._execute_python(mod, values)
+        else:
+            self._execute_terminal(mod, values)
+
+    def _execute_python(self, mod, values: dict):
+        """Run a Python script in a worker thread with progress feedback."""
+        entry = self._find_script_entry(mod)
+        if entry is None:
+            return
+
+        # Don't start if already running
+        if entry['worker'] is not None and entry['worker'].isRunning():
+            return
+
+        progress_bar = entry['progress_bar']
+        status_label = entry['status_label']
+        exec_btn = entry['exec_btn']
+
+        progress_bar.setValue(0)
+        progress_bar.setVisible(True)
+        status_label.setText('Running...')
+        status_label.setStyleSheet('font-size: 11px;')
+        status_label.setVisible(True)
+        exec_btn.setEnabled(False)
+
+        worker = _ScriptWorker(mod.run, values, self)
+
+        worker.progress.connect(lambda cur, total: (
+            progress_bar.setMaximum(total),
+            progress_bar.setValue(cur),
+        ))
+        worker.status.connect(status_label.setText)
+        worker.error.connect(lambda msg: (
+            status_label.setText(f'Error: {msg}'),
+            status_label.setStyleSheet('font-size: 11px; color: #ff6666;'),
+            logger.error('Extras script error: %s', msg),
+        ))
+        worker.finished_work.connect(lambda: self._on_python_finished(entry))
+
+        entry['worker'] = worker
+        worker.start()
+
+    def _on_python_finished(self, entry: dict):
+        entry['exec_btn'].setEnabled(True)
+        progress_bar = entry['progress_bar']
+        status_label = entry['status_label']
+        # If no error was set, show done
+        if not status_label.text().startswith('Error:'):
+            status_label.setText('Done')
+            progress_bar.setValue(progress_bar.maximum())
+
+    def _execute_terminal(self, mod, values: dict):
+        """Build command and spawn in a new terminal window."""
         try:
             cmd = mod.build_command(values)
         except Exception as e:
@@ -205,7 +324,6 @@ class ExtrasTab(QWidget):
         try:
             if sys.platform == 'win32':
                 if isinstance(cmd, str):
-                    # Raw command string (batch syntax) — pass through shell
                     full = f'start cmd /k {cmd}'
                     subprocess.Popen(full, shell=True, creationflags=subprocess.CREATE_NEW_CONSOLE)
                 else:
@@ -214,7 +332,6 @@ class ExtrasTab(QWidget):
                         creationflags=subprocess.CREATE_NEW_CONSOLE,
                     )
             else:
-                # Linux/macOS fallback
                 subprocess.Popen(cmd, shell=isinstance(cmd, str))
         except Exception as e:
             logger.error('Failed to spawn command: %s', e)
