@@ -664,14 +664,14 @@ class CaptionTab(QWidget):
         self.image_list.current_changed.connect(self._on_image_changed)
         self.image_list.load_directory_requested.connect(self._load_directory)
         self.image_list.tags_paste_requested.connect(self._on_tags_pasted)
+        self.image_list.images_deleted.connect(self._on_images_deleted)
         self.image_list.filter_input.textChanged.connect(
             self._update_tag_highlights)
 
         # Tag input
         self.add_tag_btn.clicked.connect(self._add_tag)
         self.tag_input.tag_submitted.connect(self._add_tag)
-        self.tag_completer.activated.connect(
-            lambda: QTimer.singleShot(0, self._add_tag))
+        self.tag_completer.activated.connect(self._on_completer_activated)
 
         # Tag list actions
         self.remove_tag_btn.clicked.connect(self._remove_selected_tags)
@@ -829,6 +829,18 @@ class CaptionTab(QWidget):
         # Preload adjacent images after current frame finishes
         QTimer.singleShot(0, lambda idx=index: self._preload_adjacent(idx))
 
+    def _on_images_deleted(self):
+        """Refresh UI after images were deleted from disk and model."""
+        self._current_image_index = -1
+        current_row = self.image_list.current_source_row()
+        if current_row >= 0:
+            self._on_image_changed(current_row)
+        else:
+            self.image_viewer.load_image(None)
+            self.tags_list.set_tags([])
+        self._rebuild_all_tags()
+        self._update_token_count()
+
     def _preview_max_dim(self) -> int:
         vp = self.image_viewer.viewport().size()
         return max(vp.width(), vp.height(), 800) * 2
@@ -907,6 +919,13 @@ class CaptionTab(QWidget):
     # ------------------------------------------------------------------
     # Tag editing (current image)
     # ------------------------------------------------------------------
+
+    def _on_completer_activated(self):
+        """Handle completer selection: add tag and close popup."""
+        def _do():
+            self._add_tag()
+            self.tag_completer.popup().hide()
+        QTimer.singleShot(0, _do)
 
     def _add_tag(self):
         text = self.tag_input.text().strip()

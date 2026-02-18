@@ -125,6 +125,20 @@ class LamaInpaintModule(BaseModificationModule):
         mask[:, 0:1] = 0
         mask[:, -1:] = 0
 
+        # BGR -> RGB (big-lama was trained on RGB)
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+        # Downscale large images to fit in VRAM (cap shortest side at 1536px)
+        orig_h, orig_w = image.shape[:2]
+        max_side = 1536
+        short_side = min(orig_h, orig_w)
+        if short_side > max_side:
+            scale = max_side / short_side
+            new_w = int(orig_w * scale)
+            new_h = int(orig_h * scale)
+            image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+            mask = cv2.resize(mask, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+
         # Prepare tensors
         img_tensor = self._prepare_image(image)
         mask_tensor = self._prepare_mask(mask)
@@ -133,9 +147,17 @@ class LamaInpaintModule(BaseModificationModule):
             inpainted = self._model(img_tensor, mask_tensor)
             result = inpainted[0].permute(1, 2, 0).detach().cpu().numpy()
             result = np.clip(result * 255, 0, 255).astype(np.uint8)
+        del img_tensor, mask_tensor, inpainted
 
-        # Crop back to original size
+        # Crop padding back to inference size
         result = result[:image.shape[0], :image.shape[1]]
+
+        # Upscale back to original resolution if we downscaled
+        if short_side > max_side:
+            result = cv2.resize(result, (orig_w, orig_h), interpolation=cv2.INTER_LANCZOS4)
+
+        # RGB -> BGR for cv2.imwrite
+        result = cv2.cvtColor(result, cv2.COLOR_RGB2BGR)
 
         # Save result
         output_path = image_path.parent / f'{image_path.stem}_inpainted.png'

@@ -227,6 +227,7 @@ class CaptionImageList(QWidget):
     selection_changed = Signal(list)         # list of source model rows
     load_directory_requested = Signal(str)
     tags_paste_requested = Signal(list, list)  # tags, source indices
+    images_deleted = Signal()                # after images removed from disk
 
     def __init__(self, model: ImageListModel, parent=None):
         super().__init__(parent)
@@ -315,6 +316,13 @@ class CaptionImageList(QWidget):
         self._act_open.setShortcut('Ctrl+O')
         self._act_open.triggered.connect(self._open_image)
 
+        self.context_menu.addSeparator()
+
+        self._act_delete_images = self.context_menu.addAction(
+            'Delete Image with Tags')
+        self._act_delete_images.setShortcut('Delete')
+        self._act_delete_images.triggered.connect(self._delete_images_with_tags)
+
         # Register shortcuts on list_view so they work without menu open
         for act in self.context_menu.actions():
             if not act.isSeparator():
@@ -377,6 +385,9 @@ class CaptionImageList(QWidget):
         self._act_clear_tags.setText(
             f'Delete Tags from {count} Image{s}' if count else
             'Delete Tags from Selected')
+        self._act_delete_images.setText(
+            f'Delete {count} Image{s} with Tags' if count else
+            'Delete Image with Tags')
 
     def _show_context_menu(self, pos):
         self.context_menu.exec(self.list_view.mapToGlobal(pos))
@@ -530,3 +541,35 @@ class CaptionImageList(QWidget):
         if images:
             QDesktopServices.openUrl(
                 QUrl.fromLocalFile(str(images[0].path)))
+
+    def _delete_images_with_tags(self):
+        rows = self.selected_source_rows()
+        if not rows:
+            return
+        n = len(rows)
+        s = 's' if n != 1 else ''
+        reply = QMessageBox.question(
+            self, 'Delete Images',
+            f'Permanently delete {n} image{s} and their tag files from disk?',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        import os
+        for row in rows:
+            image = self.model.images[row]
+            # Delete image file
+            try:
+                os.remove(image.path)
+            except OSError:
+                pass
+            # Delete tags file
+            try:
+                if image.caption_path.exists():
+                    os.remove(image.caption_path)
+            except OSError:
+                pass
+
+        self.model.remove_rows(rows)
+        self._update_counter()
+        self.images_deleted.emit()

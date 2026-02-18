@@ -21,28 +21,32 @@ class ModificationWorker(BaseWorker):
     def do_work(self):
         total = len(self.images)
         errors = []
-        for i, image in enumerate(self.images):
-            if self.is_cancelled:
-                break
+        try:
+            for i, image in enumerate(self.images):
+                if self.is_cancelled:
+                    break
 
-            self.status.emit(f'Modifying {i + 1}/{total}: {image.filename}')
-            self.progress.emit(i, total)
+                self.status.emit(f'Modifying {i + 1}/{total}: {image.filename}')
+                self.progress.emit(i, total)
 
-            try:
-                source = image.display_path if self.use_current else image.path
-                if image.mask_path is None:
-                    self.status.emit(f'Skipping {image.filename}: no mask')
-                    continue
+                try:
+                    source = image.display_path if self.use_current else image.path
+                    if image.mask_path is None:
+                        self.status.emit(f'Skipping {image.filename}: no mask')
+                        continue
 
-                output_path = self.module.run(source, image.mask_path)
-                self.modification_complete.emit(i, str(output_path))
-            except Exception as e:
-                msg = f'{image.filename}: {e}'
-                errors.append(msg)
-                self.status.emit(f'Error: {msg}')
+                    output_path = self.module.run(source, image.mask_path)
+                    self.modification_complete.emit(i, str(output_path))
+                except Exception as e:
+                    msg = f'{image.filename}: {e}'
+                    errors.append(msg)
+                    self.status.emit(f'Error: {msg}')
 
-            if (i + 1) % self.BATCH_SIZE == 0:
-                self._cleanup_memory()
+                if (i + 1) % self.BATCH_SIZE == 0:
+                    self._cleanup_memory()
+        finally:
+            if hasattr(self.module, 'unload'):
+                self.module.unload()
 
         self.progress.emit(total, total)
         if errors:

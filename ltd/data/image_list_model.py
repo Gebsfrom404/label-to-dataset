@@ -203,6 +203,15 @@ class ImageListModel(QAbstractListModel):
         self._thumbnail_cache.clear()
         self.endResetModel()
 
+    def remove_rows(self, rows: list[int]):
+        """Remove images at the given source rows (descending-safe)."""
+        for row in sorted(rows, reverse=True):
+            if 0 <= row < len(self.images):
+                self.beginRemoveRows(QModelIndex(), row, row)
+                image = self.images.pop(row)
+                self._thumbnail_cache.pop(str(image.path), None)
+                self.endRemoveRows()
+
     def invalidate_thumbnail(self, index: int):
         """Clear cached thumbnail for an image so it reloads."""
         if 0 <= index < len(self.images):

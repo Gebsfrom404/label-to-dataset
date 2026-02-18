@@ -26,7 +26,7 @@ from ltd.utils.mask_utils import (bbox_to_mask, create_empty_mask,
                                    mask_to_polygons, masks_overlap,
                                    merge_masks, polygon_to_mask, save_mask)
 from ltd.utils.yolo_format import read_yolo_labels, write_yolo_labels
-from ltd.widgets.canvas_widget import CanvasWidget, Tool
+from ltd.widgets.canvas_widget import CanvasWidget, DrawMode, Tool
 from ltd.widgets.label_image_list import LabelImageList
 from ltd.widgets.loading_dialog import loading_dialog
 from ltd.widgets.module_selector import ModuleSelector
@@ -65,6 +65,7 @@ class LabelTab(QWidget):
         self._setup_shortcuts()
         self._connect_signals()
         self._restore_classes()
+        self._install_space_filter()
 
     def _setup_ui(self):
         layout = QHBoxLayout(self)
@@ -85,7 +86,7 @@ class LabelTab(QWidget):
         tools = [
             ('Hand (M)', Tool.HAND), ('Pointer (P)', Tool.POINTER),
             ('BBox (R)', Tool.BBOX), ('Polygon (V)', Tool.POLYGON),
-            ('Brush (B)', Tool.MARKER), ('Eraser (E)', Tool.ERASER),
+            ('Brush (B)', Tool.MARKER),
         ]
         self.tool_group = QButtonGroup(self)
         self.tool_group.setExclusive(True)
@@ -98,6 +99,29 @@ class LabelTab(QWidget):
             self.tool_buttons[tool] = btn
             tool_bar.addWidget(btn)
         self.tool_buttons[Tool.HAND].setChecked(True)
+
+        tool_bar.addWidget(self._make_separator())
+
+        # Draw mode buttons (New / Combine / Erase)
+        self.mode_buttons: dict[DrawMode, QToolButton] = {}
+        self.mode_group = QButtonGroup(self)
+        self.mode_group.setExclusive(True)
+        modes = [
+            ('New (1)', DrawMode.NEW),
+            ('Combine (2)', DrawMode.COMBINE),
+            ('Erase (3)', DrawMode.ERASE),
+        ]
+        for text, mode in modes:
+            btn = QToolButton()
+            btn.setText(text)
+            btn.setCheckable(True)
+            btn.setProperty('draw_mode', mode)
+            self.mode_group.addButton(btn)
+            self.mode_buttons[mode] = btn
+            tool_bar.addWidget(btn)
+        self.mode_buttons[DrawMode.NEW].setChecked(True)
+
+        tool_bar.addWidget(self._make_separator())
 
         # Brush size
         tool_bar.addWidget(QLabel('Brush:'))
@@ -173,6 +197,8 @@ class LabelTab(QWidget):
         detect_btn_layout.addWidget(self.auto_label_current_btn)
         self.auto_label_btn = QPushButton('Auto-Label All')
         detect_btn_layout.addWidget(self.auto_label_btn)
+        self.auto_label_unlabeled_btn = QPushButton('Auto-Label Unlabeled')
+        detect_btn_layout.addWidget(self.auto_label_unlabeled_btn)
         detection_layout.addLayout(detect_btn_layout)
 
         self.detection_progress = QProgressBar()
@@ -218,14 +244,28 @@ class LabelTab(QWidget):
         splitter.setSizes([200, 600, 300])
         layout.addWidget(splitter)
 
+    @staticmethod
+    def _make_separator():
+        sep = QLabel('|')
+        sep.setStyleSheet('color: gray; margin: 0 2px;')
+        return sep
+
     def _setup_shortcuts(self):
         shortcuts = {
             'M': Tool.HAND, 'P': Tool.POINTER, 'R': Tool.BBOX,
-            'V': Tool.POLYGON, 'B': Tool.MARKER, 'E': Tool.ERASER,
+            'V': Tool.POLYGON, 'B': Tool.MARKER,
         }
         for key, tool in shortcuts.items():
             sc = QShortcut(QKeySequence(key), self)
             sc.activated.connect(lambda t=tool: self._set_tool(t))
+
+        # Draw mode shortcuts: 1=New, 2=Combine, 3=Erase
+        mode_shortcuts = {
+            '1': DrawMode.NEW, '2': DrawMode.COMBINE, '3': DrawMode.ERASE,
+        }
+        for key, mode in mode_shortcuts.items():
+            sc = QShortcut(QKeySequence(key), self)
+            sc.activated.connect(lambda m=mode: self._set_draw_mode(m))
 
         QShortcut(QKeySequence('A'), self).activated.connect(
             self.image_list.go_to_previous)
@@ -240,11 +280,29 @@ class LabelTab(QWidget):
         QShortcut(QKeySequence('Ctrl+Z'), self).activated.connect(
             self._undo)
 
+    def _install_space_filter(self):
+        """Install event filter on all child widgets to capture spacebar."""
+        self.installEventFilter(self)
+        for child in self.findChildren(QWidget):
+            child.installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        from PySide6.QtCore import QEvent
+        if event.type() in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
+            if event.key() == Qt.Key.Key_Space and not event.isAutoRepeat():
+                if event.type() == QEvent.Type.KeyPress:
+                    self.canvas.keyPressEvent(event)
+                else:
+                    self.canvas.keyReleaseEvent(event)
+                return True
+        return super().eventFilter(obj, event)
+
     def _connect_signals(self):
         self.image_list.current_changed.connect(self._on_image_changed)
         self.image_list.load_directory_requested.connect(self._load_directory)
 
         self.tool_group.buttonClicked.connect(self._on_tool_button)
+        self.mode_group.buttonClicked.connect(self._on_mode_button)
         self.brush_spin.valueChanged.connect(
             lambda v: setattr(self.canvas, 'brush_size', v))
         # Sync brush_spin when canvas changes brush size (scroll wheel)
@@ -257,6 +315,7 @@ class LabelTab(QWidget):
 
         self.canvas.label_created.connect(self._on_label_created)
         self.canvas.label_selected.connect(self._on_label_selected)
+        self.canvas.label_modified.connect(self._on_label_modified)
         self.canvas.mask_updated.connect(self._on_mask_updated)
 
         self.delete_label_btn.clicked.connect(self._delete_selected_label)
@@ -265,6 +324,7 @@ class LabelTab(QWidget):
 
         self.auto_label_current_btn.clicked.connect(self._run_auto_detection_current)
         self.auto_label_btn.clicked.connect(self._run_auto_detection)
+        self.auto_label_unlabeled_btn.clicked.connect(self._run_auto_detection_unlabeled)
         self.cancel_detection_btn.clicked.connect(self._cancel_detection)
 
         self.save_masks_btn.clicked.connect(self._save_masks)
@@ -449,6 +509,17 @@ class LabelTab(QWidget):
         if tool:
             self.canvas.current_tool = tool
 
+    def _set_draw_mode(self, mode: DrawMode):
+        self.canvas.draw_mode = mode
+        btn = self.mode_buttons.get(mode)
+        if btn:
+            btn.setChecked(True)
+
+    def _on_mode_button(self, btn):
+        mode = btn.property('draw_mode')
+        if mode:
+            self.canvas.draw_mode = mode
+
     # --- Class management ---
 
     def _add_class(self):
@@ -528,7 +599,11 @@ class LabelTab(QWidget):
         if image is None:
             return
         self._push_undo()
-        image.labels.append(label)
+        mode = self.canvas.draw_mode
+        if mode == DrawMode.NEW:
+            image.labels.append(label)
+        elif mode in (DrawMode.COMBINE, DrawMode.ERASE):
+            self._apply_label_with_mode(image, label, mode)
         colors = self._get_colors()
         self.canvas.display_labels(image.labels, colors)
         self._refresh_labels_list()
@@ -540,16 +615,24 @@ class LabelTab(QWidget):
         else:
             self.canvas.highlight_label(-1)
 
+    def _on_label_modified(self, index: int, label):
+        """Handle label modification from canvas drag."""
+        image = self.model.get_image(self._current_image_index)
+        if image is None or index < 0 or index >= len(image.labels):
+            return
+        self._push_undo()
+        image.labels[index] = label
+        self._refresh_labels_list()
+        self._save_current_labels()
+        # Re-select the same label in the list
+        if 0 <= index < self.labels_list.count():
+            self.labels_list.setCurrentRow(index)
+
     def _on_label_list_selected(self, row: int):
         self.canvas.highlight_label(row)
 
-    def _on_mask_updated(self, erase: bool = False):
-        """Convert drawn mask to polygon labels.
-
-        If erase=False (marker), merge with overlapping same-class labels.
-        If erase=True (eraser), subtract from overlapping same-class labels.
-        """
-        import cv2
+    def _on_mask_updated(self, draw_mode=None):
+        """Convert drawn mask to polygon label, then apply using draw mode."""
         image = self.model.get_image(self._current_image_index)
         if image is None:
             return
@@ -564,9 +647,55 @@ class LabelTab(QWidget):
             self.canvas.clear_mask()
             return
 
-        self._push_undo()
         h, w = drawn_mask.shape
         current_class = self.canvas._current_class_id
+
+        # Convert drawn mask to polygon label
+        new_polygons = mask_to_polygons(drawn_mask)
+        if not new_polygons:
+            self.canvas.clear_mask()
+            return
+
+        # Build a label from the drawn mask
+        poly_pts = new_polygons[0]
+        # If multiple disconnected regions, merge them all
+        all_pts = []
+        for pts in new_polygons:
+            all_pts.extend(pts)
+
+        if draw_mode is None:
+            draw_mode = self.canvas.draw_mode
+
+        self._push_undo()
+
+        if draw_mode == DrawMode.NEW:
+            # Each polygon region becomes its own label
+            for poly_pts in new_polygons:
+                xs = [p[0] for p in poly_pts]
+                ys = [p[1] for p in poly_pts]
+                cx = (min(xs) + max(xs)) / 2
+                cy = (min(ys) + max(ys)) / 2
+                bw = max(xs) - min(xs)
+                bh = max(ys) - min(ys)
+                label = Label(class_id=current_class,
+                              bbox=(cx, cy, bw, bh), polygon=poly_pts)
+                image.labels.append(label)
+        else:
+            # Combine or Erase: work with overlapping same-class labels
+            self._apply_brush_with_mode(image, drawn_mask, current_class,
+                                        w, h, draw_mode)
+
+        # Clear mask buffer, update display
+        self.canvas.clear_mask()
+        colors = self._get_colors()
+        self.canvas.display_labels(image.labels, colors)
+        self._refresh_labels_list()
+        self._save_current_labels()
+
+    def _apply_brush_with_mode(self, image, drawn_mask, current_class,
+                                w, h, mode: DrawMode):
+        """Apply brush drawn_mask using Combine or Erase mode."""
+        import cv2
 
         # Find existing same-class labels that overlap with the drawn mask
         overlapping_indices = []
@@ -577,40 +706,35 @@ class LabelTab(QWidget):
             if lmask is not None and masks_overlap(drawn_mask, lmask):
                 overlapping_indices.append(i)
 
-        if erase:
-            # Subtract drawn area from overlapping labels
+        if mode == DrawMode.ERASE:
             if not overlapping_indices:
-                self.canvas.clear_mask()
                 return
-            # Build combined mask of overlapping labels
             overlap_masks = []
             for i in overlapping_indices:
                 lmask = label_to_mask(image.labels[i], w, h)
                 if lmask is not None:
                     overlap_masks.append(lmask)
             if not overlap_masks:
-                self.canvas.clear_mask()
                 return
             combined = merge_masks(overlap_masks)
-            # Subtract: keep only pixels that are in labels but NOT in drawn
-            erased = cv2.bitwise_and(combined, cv2.bitwise_not(drawn_mask))
+            result = cv2.bitwise_and(combined, cv2.bitwise_not(drawn_mask))
         else:
-            # Merge: combine drawn mask with overlapping labels
+            # Combine mode
             combined = drawn_mask.copy()
             for i in overlapping_indices:
                 lmask = label_to_mask(image.labels[i], w, h)
                 if lmask is not None:
                     combined = cv2.bitwise_or(combined, lmask)
-            erased = combined
+            result = combined
 
         # Convert result mask to polygon(s)
-        new_polygons = mask_to_polygons(erased)
+        new_polygons = mask_to_polygons(result)
 
         # Remove overlapping labels (reverse order to preserve indices)
         for i in sorted(overlapping_indices, reverse=True):
             image.labels.pop(i)
 
-        # Add new polygon labels (if any remain after erase)
+        # Add new polygon labels
         for poly_pts in new_polygons:
             xs = [p[0] for p in poly_pts]
             ys = [p[1] for p in poly_pts]
@@ -622,12 +746,24 @@ class LabelTab(QWidget):
                           bbox=(cx, cy, bw, bh), polygon=poly_pts)
             image.labels.append(label)
 
-        # Clear mask buffer, update display
-        self.canvas.clear_mask()
-        colors = self._get_colors()
-        self.canvas.display_labels(image.labels, colors)
-        self._refresh_labels_list()
-        self._save_current_labels()
+    def _apply_label_with_mode(self, image, label: Label, mode: DrawMode):
+        """Apply a polygon label using Combine or Erase mode (for polygon tool)."""
+        if not label.has_polygon:
+            # BBox-only labels can't combine/erase, just add
+            image.labels.append(label)
+            return
+
+        h, w = self.canvas._image_height, self.canvas._image_width
+        if h == 0 or w == 0:
+            return
+
+        drawn_mask = polygon_to_mask(label.polygon, w, h)
+        if drawn_mask is None:
+            return
+
+        current_class = label.class_id
+        self._apply_brush_with_mode(image, drawn_mask, current_class,
+                                     w, h, mode)
 
     def _delete_selected_label(self):
         image = self.model.get_image(self._current_image_index)
@@ -687,6 +823,7 @@ class LabelTab(QWidget):
         self.detection_status.setText(f'Detecting: {image.filename}...')
         self.auto_label_current_btn.setEnabled(False)
         self.auto_label_btn.setEnabled(False)
+        self.auto_label_unlabeled_btn.setEnabled(False)
 
         try:
             results = module.run(image.path)
@@ -716,6 +853,7 @@ class LabelTab(QWidget):
         finally:
             self.auto_label_current_btn.setEnabled(True)
             self.auto_label_btn.setEnabled(True)
+            self.auto_label_unlabeled_btn.setEnabled(True)
 
     def _run_auto_detection(self):
         if not self.classes:
@@ -748,6 +886,46 @@ class LabelTab(QWidget):
         self.cancel_detection_btn.setVisible(True)
         self.auto_label_btn.setEnabled(False)
         self.auto_label_current_btn.setEnabled(False)
+        self.auto_label_unlabeled_btn.setEnabled(False)
+        self._worker.start()
+
+    def _run_auto_detection_unlabeled(self):
+        if not self.classes:
+            QMessageBox.warning(self, 'Warning',
+                                'Add at least one class before auto-labeling.')
+            return
+        if self.module_selector is None:
+            return
+        module = self.module_selector.current_module()
+        if module is None:
+            return
+
+        unlabeled = [img for img in self.model.images if not img.labels]
+        if not unlabeled:
+            QMessageBox.information(self, 'Info', 'All images already have labels.')
+            return
+
+        class_map = self._get_class_map(module)
+
+        try:
+            module.prepare()
+        except Exception as e:
+            QMessageBox.critical(self, 'Module Error', str(e))
+            return
+
+        self._worker = DetectionWorker(module, unlabeled,
+                                        class_map=class_map)
+        self._worker.progress.connect(self._on_detection_progress)
+        self._worker.status.connect(self._on_detection_status)
+        self._worker.detection_complete.connect(self._on_detection_result)
+        self._worker.finished_work.connect(self._on_detection_finished)
+        self._worker.error.connect(self._on_detection_error)
+
+        self.detection_progress.setVisible(True)
+        self.cancel_detection_btn.setVisible(True)
+        self.auto_label_btn.setEnabled(False)
+        self.auto_label_current_btn.setEnabled(False)
+        self.auto_label_unlabeled_btn.setEnabled(False)
         self._worker.start()
 
     def _cancel_detection(self):
@@ -761,28 +939,35 @@ class LabelTab(QWidget):
     def _on_detection_status(self, text):
         self.detection_status.setText(text)
 
-    def _on_detection_result(self, index, labels):
+    def _on_detection_result(self, worker_index, labels):
         """Append detected labels to existing ones."""
-        image = self.model.get_image(index)
-        if image:
-            # Push undo snapshot (uses index directly since detection may
-            # target a different image than the currently displayed one)
-            stack = self._undo_stacks.setdefault(index, [])
-            stack.append(copy.deepcopy(image.labels))
-            if len(stack) > self._max_undo:
-                stack.pop(0)
-            image.labels.extend(labels)
-            write_yolo_labels(self._label_path_for(image), image.labels)
-            if index == self._current_image_index:
-                colors = self._get_colors()
-                self.canvas.display_labels(image.labels, colors)
-                self._refresh_labels_list()
+        if not self._worker:
+            return
+        image = self._worker.images[worker_index]
+        # Find the real model index for undo stack and display check
+        try:
+            model_index = self.model.images.index(image)
+        except ValueError:
+            return
+        # Push undo snapshot (uses model index since detection may
+        # target a different image than the currently displayed one)
+        stack = self._undo_stacks.setdefault(model_index, [])
+        stack.append(copy.deepcopy(image.labels))
+        if len(stack) > self._max_undo:
+            stack.pop(0)
+        image.labels.extend(labels)
+        write_yolo_labels(self._label_path_for(image), image.labels)
+        if model_index == self._current_image_index:
+            colors = self._get_colors()
+            self.canvas.display_labels(image.labels, colors)
+            self._refresh_labels_list()
 
     def _on_detection_finished(self):
         self.detection_progress.setVisible(False)
         self.cancel_detection_btn.setVisible(False)
         self.auto_label_btn.setEnabled(True)
         self.auto_label_current_btn.setEnabled(True)
+        self.auto_label_unlabeled_btn.setEnabled(True)
         self._worker = None
         self.image_list.reapply_filter()
 

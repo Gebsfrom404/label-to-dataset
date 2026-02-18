@@ -168,18 +168,24 @@ class ModifyTab(QWidget):
         if image is None:
             return
 
+        # Snapshot max_dim once so both pixmaps use the same scale
+        max_dim = self._preview_max_dim()
+
         # Before: original with mask overlay
-        before_pixmap = self._create_before_pixmap(image)
-        if before_pixmap:
-            self.comparison.set_before(before_pixmap)
+        before_pixmap = self._create_before_pixmap(image, max_dim)
 
         # After: modified image (if exists) or original
         after_pixmap = None
         if image.modified_path and image.modified_path.exists():
-            after_pixmap = self._load_cached(image.modified_path)
+            after_pixmap = self._load_cached(image.modified_path, max_dim)
         if after_pixmap is None:
-            after_pixmap = self._load_cached(image.path)
-        if after_pixmap:
+            after_pixmap = self._load_cached(image.path, max_dim)
+
+        if before_pixmap and after_pixmap:
+            self.comparison.set_images(before_pixmap, after_pixmap)
+        elif before_pixmap:
+            self.comparison.set_before(before_pixmap)
+        elif after_pixmap:
             self.comparison.set_after(after_pixmap)
 
         QTimer.singleShot(0, lambda idx=index: self._preload_adjacent(idx))
@@ -188,12 +194,14 @@ class ModifyTab(QWidget):
         vp = self.comparison.viewport().size()
         return max(vp.width(), vp.height(), 800) * 2
 
-    def _load_cached(self, path):
+    def _load_cached(self, path, max_dim: int | None = None):
         key = str(path)
         if key in self._pixmap_cache:
             self._pixmap_cache.move_to_end(key)
             return self._pixmap_cache[key]
-        pixmap = load_pixmap_preview(path, self._preview_max_dim())
+        if max_dim is None:
+            max_dim = self._preview_max_dim()
+        pixmap = load_pixmap_preview(path, max_dim)
         self._pixmap_cache[key] = pixmap
         while len(self._pixmap_cache) > self._PIXMAP_CACHE_MAX:
             self._pixmap_cache.popitem(last=False)
@@ -207,11 +215,12 @@ class ModifyTab(QWidget):
             if image and str(image.path) not in self._pixmap_cache:
                 self._load_cached(image.path)
 
-    def _create_before_pixmap(self, image: ImageItem) -> QPixmap | None:
+    def _create_before_pixmap(self, image: ImageItem,
+                              max_dim: int | None = None) -> QPixmap | None:
         """Create before image with label overlays (matching Label tab look)."""
         from PySide6.QtCore import QPointF, QRectF
         from PySide6.QtGui import (QBrush, QColor, QPainter, QPen, QPolygonF)
-        pixmap = self._load_cached(image.path)
+        pixmap = self._load_cached(image.path, max_dim)
         if pixmap is None:
             return None
 
@@ -313,6 +322,9 @@ class ModifyTab(QWidget):
         self.mod_status.setText(text)
 
     def _on_mod_result(self, index, output_path):
+        # Invalidate cache for this output so we load the fresh result
+        self._pixmap_cache.pop(output_path, None)
+
         if getattr(self, '_single_mode', False):
             # Single mode: the worker got a list of 1 image
             image = self.model.get_image(self._current_image_index)

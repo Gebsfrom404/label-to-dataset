@@ -19,11 +19,16 @@ class Tool(Enum):
     BBOX = auto()
     POLYGON = auto()
     MARKER = auto()
-    ERASER = auto()
 
 
-# Signal emitted when brush_size changes (for external spin box sync)
-_BRUSH_TOOLS = (Tool.MARKER, Tool.ERASER)
+class DrawMode(Enum):
+    NEW = auto()
+    COMBINE = auto()
+    ERASE = auto()
+
+
+# Tools that use the brush cursor
+_BRUSH_TOOLS = (Tool.MARKER,)
 
 
 class CanvasWidget(QGraphicsView):
@@ -31,7 +36,7 @@ class CanvasWidget(QGraphicsView):
     label_created = Signal(object)  # emits Label
     label_selected = Signal(int)  # emits label index
     label_modified = Signal(int, object)  # emits (index, Label)
-    mask_updated = Signal(bool)  # emits erase flag (True = erase mode)
+    mask_updated = Signal(object)  # emits DrawMode
     brush_size_changed = Signal(int)  # emits new brush size
 
     def __init__(self, parent=None):
@@ -60,6 +65,9 @@ class CanvasWidget(QGraphicsView):
         self._zoom_factor = 1.0
         self._brush_size = 20
 
+        # Draw mode (New / Combine / Erase) for polygon & brush tools
+        self._draw_mode = DrawMode.NEW
+
         # Drawing state
         self._drawing = False
         self._draw_start: QPointF | None = None
@@ -77,6 +85,13 @@ class CanvasWidget(QGraphicsView):
 
         # Selected label
         self._selected_label_index = -1
+
+        # Edit handles for dragging labels/points in pointer mode
+        self._edit_handles: list[QGraphicsEllipseItem] = []
+        self._dragging_handle: int = -1  # index of handle being dragged, -1 = none
+        self._dragging_label: bool = False  # dragging entire label
+        self._drag_start: QPointF | None = None
+        self._drag_orig_points: list[QPointF] = []  # original points at drag start
 
         # Throttle mask overlay updates during drawing
         self._draw_stroke_count = 0
@@ -122,6 +137,14 @@ class CanvasWidget(QGraphicsView):
             self._update_brush_cursor_size()
             self.brush_size_changed.emit(new_size)
 
+    @property
+    def draw_mode(self) -> DrawMode:
+        return self._draw_mode
+
+    @draw_mode.setter
+    def draw_mode(self, mode: DrawMode):
+        self._draw_mode = mode
+
     def set_class_id(self, class_id: int):
         self._current_class_id = class_id
 
@@ -136,10 +159,13 @@ class CanvasWidget(QGraphicsView):
         self._brush_cursor = None
         self._brush_cursor_outer = None
         self._label_items.clear()
+        self._edit_handles.clear()
         self._polygon_points.clear()
         self._polygon_markers.clear()
         self._polygon_lines.clear()
         self._selected_label_index = -1
+        self._dragging_handle = -1
+        self._dragging_label = False
 
         self.scene_.clear()
 
@@ -165,11 +191,13 @@ class CanvasWidget(QGraphicsView):
         self._temp_rect = None
         self._brush_cursor = None
         self._label_items.clear()
+        self._edit_handles.clear()
         self._mask_buffer = None
         self.scene_.clear()
 
     def display_labels(self, labels: list[Label], class_colors: list[str]):
         """Draw label overlays on the canvas."""
+        self._remove_edit_handles()
         for item in self._label_items:
             if item.scene() is not None:
                 self.scene_.removeItem(item)
@@ -205,6 +233,7 @@ class CanvasWidget(QGraphicsView):
     def highlight_label(self, index: int):
         """Highlight a specific label on the canvas."""
         self._selected_label_index = index
+        self._remove_edit_handles()
         for i, item in enumerate(self._label_items):
             label_idx = item.data(0)
             if label_idx is None:
@@ -228,6 +257,9 @@ class CanvasWidget(QGraphicsView):
             elif isinstance(item, QGraphicsPolygonItem):
                 item.setPen(pen)
                 item.setBrush(QBrush(fill))
+        # Show edit handles on selected label
+        if index >= 0:
+            self._show_edit_handles(index)
 
     def set_mask(self, mask_qimage: QImage):
         """Set the mask buffer from an external QImage."""
@@ -320,8 +352,7 @@ class CanvasWidget(QGraphicsView):
             mask_arr = mask_from_qimage(self._mask_buffer)
             h, w = mask_arr.shape
             overlay = np.zeros((h, w, 4), dtype=np.uint8)
-            erase = getattr(self, '_erase_mode', False)
-            if erase:
+            if self._draw_mode == DrawMode.ERASE:
                 color = QColor(255, 60, 60)  # Red tint for eraser
             else:
                 color = QColor(self._class_colors[
@@ -404,15 +435,14 @@ class CanvasWidget(QGraphicsView):
 
         if event.button() == Qt.MouseButton.LeftButton:
             if self._current_tool == Tool.POINTER:
-                self._handle_pointer_click(scene_pos)
+                self._handle_pointer_press(scene_pos)
             elif self._current_tool == Tool.BBOX:
                 self._start_bbox(scene_pos)
             elif self._current_tool == Tool.POLYGON:
                 self._handle_polygon_click(scene_pos)
             elif self._current_tool == Tool.MARKER:
-                self._start_drawing(scene_pos, erase=False)
-            elif self._current_tool == Tool.ERASER:
-                self._start_drawing(scene_pos, erase=True)
+                self._start_drawing(scene_pos,
+                                    erase=(self._draw_mode == DrawMode.ERASE))
         elif event.button() == Qt.MouseButton.RightButton:
             if self._current_tool == Tool.POLYGON:
                 self._finish_polygon()
@@ -429,9 +459,12 @@ class CanvasWidget(QGraphicsView):
             super().mouseMoveEvent(event)
             return
 
-        if self._drawing and self._current_tool in _BRUSH_TOOLS:
+        if self._current_tool == Tool.POINTER and (
+                self._dragging_handle >= 0 or self._dragging_label):
+            self._handle_pointer_drag(scene_pos)
+        elif self._drawing and self._current_tool in _BRUSH_TOOLS:
             self._continue_drawing(scene_pos,
-                                   erase=(self._current_tool == Tool.ERASER))
+                                   erase=(self._draw_mode == DrawMode.ERASE))
         elif self._drawing and self._current_tool == Tool.BBOX:
             self._update_bbox(scene_pos)
         else:
@@ -443,7 +476,10 @@ class CanvasWidget(QGraphicsView):
             return
 
         if event.button() == Qt.MouseButton.LeftButton:
-            if self._current_tool == Tool.BBOX and self._drawing:
+            if self._current_tool == Tool.POINTER and (
+                    self._dragging_handle >= 0 or self._dragging_label):
+                self._finish_pointer_drag()
+            elif self._current_tool == Tool.BBOX and self._drawing:
                 scene_pos = self.mapToScene(event.position().toPoint())
                 self._finish_bbox(scene_pos)
             elif self._current_tool in _BRUSH_TOOLS and self._drawing:
@@ -522,6 +558,91 @@ class CanvasWidget(QGraphicsView):
         return (0 <= pos.x() < self._image_width and
                 0 <= pos.y() < self._image_height)
 
+    # --- Edit handles for pointer tool ---
+
+    def _remove_edit_handles(self):
+        """Remove all edit handle markers from the scene."""
+        for h in self._edit_handles:
+            if h.scene() is not None:
+                self.scene_.removeItem(h)
+        self._edit_handles.clear()
+        self._dragging_handle = -1
+        self._dragging_label = False
+
+    def _show_edit_handles(self, label_index: int):
+        """Show draggable point handles on the selected label."""
+        self._remove_edit_handles()
+        points = self._get_label_scene_points(label_index)
+        if not points:
+            return
+        # Determine color from the label item
+        item = self._label_item_by_index(label_index)
+        if item is None:
+            return
+        class_id = item.data(1) or 0
+        color = QColor(self._class_colors[class_id % len(self._class_colors)])
+        for pt in points:
+            marker = self.scene_.addEllipse(
+                pt.x() - 4, pt.y() - 4, 8, 8,
+                QPen(Qt.GlobalColor.white, 1),
+                QBrush(color))
+            marker.setZValue(20)
+            self._edit_handles.append(marker)
+
+    def _label_item_by_index(self, label_index: int) -> QGraphicsItem | None:
+        """Find the QGraphicsItem for a given label index."""
+        for item in self._label_items:
+            if item.data(0) == label_index:
+                return item
+        return None
+
+    def _get_label_scene_points(self, label_index: int) -> list[QPointF]:
+        """Get the corner/vertex points of a label in scene coords."""
+        item = self._label_item_by_index(label_index)
+        if item is None:
+            return []
+        if isinstance(item, QGraphicsPolygonItem):
+            poly = item.polygon()
+            return [QPointF(poly[i]) for i in range(poly.count())]
+        elif isinstance(item, QGraphicsRectItem):
+            r = item.rect()
+            return [r.topLeft(), r.topRight(), r.bottomRight(), r.bottomLeft()]
+        return []
+
+    def _hit_test_handle(self, pos: QPointF) -> int:
+        """Return index of handle near pos, or -1."""
+        for i, h in enumerate(self._edit_handles):
+            center = h.rect().center()
+            if hypot(pos.x() - center.x(), pos.y() - center.y()) < 8:
+                return i
+        return -1
+
+    def _handle_pointer_press(self, pos: QPointF):
+        """Handle mouse press in pointer mode — start drag or select."""
+        # First check if clicking on an edit handle
+        if self._edit_handles:
+            hi = self._hit_test_handle(pos)
+            if hi >= 0:
+                self._dragging_handle = hi
+                self._drag_start = pos
+                self._drag_orig_points = self._get_label_scene_points(
+                    self._selected_label_index)
+                return
+
+        # Check if clicking on the selected label body (drag whole shape)
+        if self._selected_label_index >= 0:
+            item = self._label_item_by_index(self._selected_label_index)
+            if item is not None and item.contains(
+                    item.mapFromScene(pos)):
+                self._dragging_label = True
+                self._drag_start = pos
+                self._drag_orig_points = self._get_label_scene_points(
+                    self._selected_label_index)
+                return
+
+        # Otherwise, try to select a label
+        self._handle_pointer_click(pos)
+
     def _handle_pointer_click(self, pos: QPointF):
         items = self.scene_.items(pos)
         for item in items:
@@ -532,6 +653,102 @@ class CanvasWidget(QGraphicsView):
                 return
         self._selected_label_index = -1
         self.label_selected.emit(-1)
+
+    def _handle_pointer_drag(self, pos: QPointF):
+        """Update label shape and handles while dragging."""
+        if self._drag_start is None or not self._drag_orig_points:
+            return
+        idx = self._selected_label_index
+        item = self._label_item_by_index(idx)
+        if item is None:
+            return
+
+        if self._dragging_handle >= 0:
+            # Dragging a single point
+            hi = self._dragging_handle
+            new_points = list(self._drag_orig_points)
+            new_points[hi] = self._clamp_to_image(pos)
+            self._apply_points_to_item(item, new_points)
+            self._update_handle_positions(new_points)
+        elif self._dragging_label:
+            # Dragging entire shape
+            dx = pos.x() - self._drag_start.x()
+            dy = pos.y() - self._drag_start.y()
+            new_points = []
+            for pt in self._drag_orig_points:
+                new_points.append(self._clamp_to_image(
+                    QPointF(pt.x() + dx, pt.y() + dy)))
+            self._apply_points_to_item(item, new_points)
+            self._update_handle_positions(new_points)
+
+    def _finish_pointer_drag(self):
+        """Finalize drag — emit label_modified with updated label."""
+        idx = self._selected_label_index
+        was_dragging = self._dragging_handle >= 0 or self._dragging_label
+        self._dragging_handle = -1
+        self._dragging_label = False
+        self._drag_start = None
+        self._drag_orig_points = []
+
+        if not was_dragging or idx < 0:
+            return
+
+        item = self._label_item_by_index(idx)
+        if item is None:
+            return
+
+        # Build updated Label from current item geometry
+        if isinstance(item, QGraphicsPolygonItem):
+            poly = item.polygon()
+            points = [(poly[i].x() / self._image_width,
+                        poly[i].y() / self._image_height)
+                       for i in range(poly.count())]
+            xs = [p[0] for p in points]
+            ys = [p[1] for p in points]
+            cx = (min(xs) + max(xs)) / 2
+            cy = (min(ys) + max(ys)) / 2
+            w = max(xs) - min(xs)
+            h = max(ys) - min(ys)
+            class_id = item.data(1) or 0
+            label = Label(class_id=class_id,
+                          bbox=(cx, cy, w, h), polygon=points)
+        elif isinstance(item, QGraphicsRectItem):
+            r = item.rect()
+            cx = r.center().x() / self._image_width
+            cy = r.center().y() / self._image_height
+            w = r.width() / self._image_width
+            h = r.height() / self._image_height
+            class_id = item.data(1) or 0
+            label = Label(class_id=class_id, bbox=(cx, cy, w, h))
+        else:
+            return
+
+        self.label_modified.emit(idx, label)
+
+    def _clamp_to_image(self, pos: QPointF) -> QPointF:
+        """Clamp a point to image boundaries."""
+        x = max(0, min(self._image_width - 1, pos.x()))
+        y = max(0, min(self._image_height - 1, pos.y()))
+        return QPointF(x, y)
+
+    def _apply_points_to_item(self, item: QGraphicsItem,
+                               points: list[QPointF]):
+        """Update a label item's geometry from a list of points."""
+        if isinstance(item, QGraphicsPolygonItem):
+            item.setPolygon(QPolygonF(points))
+        elif isinstance(item, QGraphicsRectItem):
+            # Rebuild rect from 4 corner points (TL, TR, BR, BL)
+            xs = [p.x() for p in points]
+            ys = [p.y() for p in points]
+            item.setRect(QRectF(min(xs), min(ys),
+                                max(xs) - min(xs), max(ys) - min(ys)))
+
+    def _update_handle_positions(self, points: list[QPointF]):
+        """Move edit handle markers to match new point positions."""
+        for i, pt in enumerate(points):
+            if i < len(self._edit_handles):
+                self._edit_handles[i].setRect(
+                    pt.x() - 4, pt.y() - 4, 8, 8)
 
     # --- BBox tool ---
 
@@ -624,16 +841,15 @@ class CanvasWidget(QGraphicsView):
         self._polygon_lines.clear()
         self._polygon_points.clear()
 
-    # --- Freehand drawing (Marker/Eraser) ---
+    # --- Freehand drawing (Brush) ---
 
-    def _start_drawing(self, pos: QPointF, erase: bool):
+    def _start_drawing(self, pos: QPointF, erase: bool = False):
         self._drawing = True
-        self._erase_mode = erase
         self._draw_stroke_count = 0
         self._last_draw_pos = pos
         self._draw_on_mask(pos, pos)
 
-    def _continue_drawing(self, pos: QPointF, erase: bool):
+    def _continue_drawing(self, pos: QPointF, erase: bool = False):
         self._draw_on_mask(self._last_draw_pos, pos)
         self._last_draw_pos = pos
         self._draw_stroke_count += 1
@@ -642,9 +858,8 @@ class CanvasWidget(QGraphicsView):
 
     def _stop_drawing(self):
         self._drawing = False
-        erase = getattr(self, '_erase_mode', False)
         self._update_mask_overlay_fast()
-        self.mask_updated.emit(erase)
+        self.mask_updated.emit(self._draw_mode)
 
     def _draw_on_mask(self, from_pos: QPointF, to_pos: QPointF):
         """Draw a continuous stroke between two points on the mask."""
