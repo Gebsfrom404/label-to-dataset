@@ -1,10 +1,12 @@
 """Caption-specific image list with filter bar, multi-select, context menu."""
 import operator
 import re
+import shutil
 from fnmatch import fnmatchcase
 from pathlib import Path
 
-from PySide6.QtCore import QModelIndex, QSize, QSortFilterProxyModel, Qt, QUrl, Signal
+from PySide6.QtCore import (QFile, QModelIndex, QSize, QSortFilterProxyModel,
+                             Qt, QUrl, Signal)
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog,
                                QLabel, QLineEdit, QListView, QMenu,
@@ -290,12 +292,6 @@ class CaptionImageList(QWidget):
         self._act_paste_tags.setShortcut('Ctrl+V')
         self._act_paste_tags.triggered.connect(self._paste_tags)
 
-        self._act_clear_tags = self.context_menu.addAction(
-            'Delete Tags from Selected')
-        self._act_clear_tags.triggered.connect(self._clear_selected_tags)
-
-        self.context_menu.addSeparator()
-
         self._act_copy_names = self.context_menu.addAction('Copy File Names')
         self._act_copy_names.setShortcut('Ctrl+Alt+C')
         self._act_copy_names.triggered.connect(self._copy_file_names)
@@ -306,22 +302,25 @@ class CaptionImageList(QWidget):
 
         self.context_menu.addSeparator()
 
+        self._act_move_images = self.context_menu.addAction(
+            'Move Image to...')
+        self._act_move_images.setShortcut('Ctrl+M')
+        self._act_move_images.triggered.connect(self._move_images_to)
+
         self._act_copy_images = self.context_menu.addAction(
-            'Copy Images to...')
+            'Copy Image to...')
         self._act_copy_images.setShortcut('Ctrl+Shift+M')
         self._act_copy_images.triggered.connect(self._copy_images_to)
+
+        self._act_delete_images = self.context_menu.addAction(
+            'Delete Image with Tags')
+        self._act_delete_images.setShortcut('Ctrl+Del')
+        self._act_delete_images.triggered.connect(self._delete_images_with_tags)
 
         self._act_open = self.context_menu.addAction(
             'Open in Default App')
         self._act_open.setShortcut('Ctrl+O')
         self._act_open.triggered.connect(self._open_image)
-
-        self.context_menu.addSeparator()
-
-        self._act_delete_images = self.context_menu.addAction(
-            'Delete Image with Tags')
-        self._act_delete_images.setShortcut('Delete')
-        self._act_delete_images.triggered.connect(self._delete_images_with_tags)
 
         # Register shortcuts on list_view so they work without menu open
         for act in self.context_menu.actions():
@@ -380,14 +379,10 @@ class CaptionImageList(QWidget):
         s = 's' if count != 1 else ''
         self._act_copy_names.setText(f'Copy File Name{s}')
         self._act_copy_paths.setText(f'Copy Path{s}')
+        self._act_move_images.setText(f'Move Image{s} to...')
         self._act_copy_images.setText(f'Copy Image{s} to...')
+        self._act_delete_images.setText(f'Delete Image{s} with Tags')
         self._act_open.setVisible(count == 1)
-        self._act_clear_tags.setText(
-            f'Delete Tags from {count} Image{s}' if count else
-            'Delete Tags from Selected')
-        self._act_delete_images.setText(
-            f'Delete {count} Image{s} with Tags' if count else
-            'Delete Image with Tags')
 
     def _show_context_menu(self, pos):
         self.context_menu.exec(self.list_view.mapToGlobal(pos))
@@ -490,22 +485,6 @@ class CaptionImageList(QWidget):
                 return
         self.tags_paste_requested.emit(tags, rows)
 
-    def _clear_selected_tags(self):
-        rows = self.selected_source_rows()
-        if not rows:
-            return
-        reply = QMessageBox.question(
-            self, 'Delete Tags',
-            f'Delete all tags from {len(rows)} selected image(s)?',
-            QMessageBox.StandardButton.Yes |
-            QMessageBox.StandardButton.No)
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-        for row in rows:
-            self.model.images[row].tags = []
-        # Emit so caption tab refreshes
-        self.tags_paste_requested.emit([], rows)
-
     def _copy_file_names(self):
         images = self.get_selected_images()
         names = [img.filename for img in images]
@@ -515,6 +494,30 @@ class CaptionImageList(QWidget):
         images = self.get_selected_images()
         paths = [str(img.path) for img in images]
         QApplication.clipboard().setText('\n'.join(paths))
+
+    def _move_images_to(self):
+        images = self.get_selected_images()
+        if not images:
+            return
+        dest = QFileDialog.getExistingDirectory(
+            self, f'Move {len(images)} Image(s) to...')
+        if not dest:
+            return
+        dest_path = Path(dest)
+        rows = self.selected_source_rows()
+        for img in images:
+            try:
+                shutil.move(str(img.path), dest_path / img.filename)
+                if img.caption_path.exists():
+                    shutil.move(str(img.caption_path),
+                                dest_path / img.caption_path.name)
+            except OSError as e:
+                QMessageBox.critical(
+                    self, 'Error', f'Failed to move {img.filename}: {e}')
+                return
+        self.model.remove_rows(rows)
+        self._update_counter()
+        self.images_deleted.emit()
 
     def _copy_images_to(self):
         images = self.get_selected_images()
@@ -527,11 +530,10 @@ class CaptionImageList(QWidget):
         dest_path = Path(dest)
         for img in images:
             try:
-                import shutil as _shutil
-                _shutil.copy2(img.path, dest_path / img.filename)
+                shutil.copy2(img.path, dest_path / img.filename)
                 if img.caption_path.exists():
-                    _shutil.copy2(img.caption_path,
-                                  dest_path / img.caption_path.name)
+                    shutil.copy2(img.caption_path,
+                                 dest_path / img.caption_path.name)
             except OSError as e:
                 QMessageBox.critical(
                     self, 'Error', f'Failed to copy {img.filename}: {e}')
@@ -550,25 +552,21 @@ class CaptionImageList(QWidget):
         s = 's' if n != 1 else ''
         reply = QMessageBox.question(
             self, 'Delete Images',
-            f'Permanently delete {n} image{s} and their tag files from disk?',
+            f'Delete {n} image{s} and '
+            f'{"its" if n == 1 else "their"} tag file{s}?',
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         if reply != QMessageBox.StandardButton.Yes:
             return
 
-        import os
         for row in rows:
             image = self.model.images[row]
-            # Delete image file
-            try:
-                os.remove(image.path)
-            except OSError:
-                pass
-            # Delete tags file
-            try:
-                if image.caption_path.exists():
-                    os.remove(image.caption_path)
-            except OSError:
-                pass
+            f = QFile(str(image.path))
+            if not f.moveToTrash():
+                QMessageBox.critical(
+                    self, 'Error', f'Failed to delete {image.filename}.')
+            caption_file = QFile(str(image.caption_path))
+            if caption_file.exists():
+                caption_file.moveToTrash()
 
         self.model.remove_rows(rows)
         self._update_counter()
