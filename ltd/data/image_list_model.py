@@ -84,7 +84,7 @@ class ImageListModel(QAbstractListModel):
             return None
         image = self.images[index.row()]
         if role == Qt.ItemDataRole.DisplayRole:
-            return image.filename
+            return image.display_name
         elif role == Qt.ItemDataRole.DecorationRole:
             key = str(image.path)
             if key in self._thumbnail_cache:
@@ -93,7 +93,7 @@ class ImageListModel(QAbstractListModel):
         elif role == Qt.ItemDataRole.UserRole:
             return image
         elif role == Qt.ItemDataRole.ToolTipRole:
-            return f'{image.filename}\n{image.width}x{image.height}'
+            return f'{image.display_name}\n{image.width}x{image.height}'
         return None
 
     def _start_thumbnail_worker(self):
@@ -150,7 +150,7 @@ class ImageListModel(QAbstractListModel):
         self._thumb_worker = None
 
     def load_directory(self, directory: Path):
-        """Load all images from a directory."""
+        """Load all images from a directory (recursing into subfolders)."""
         self._cancel_thumbnail_worker()
         self.beginResetModel()
         self.images.clear()
@@ -161,10 +161,11 @@ class ImageListModel(QAbstractListModel):
             return
 
         image_files = sorted(
-            [f for f in directory.iterdir()
+            [f for f in directory.rglob('*')
              if f.is_file() and f.suffix.lower() in IMAGE_EXTENSIONS],
-            key=lambda f: f.name.lower()
+            key=lambda f: f.relative_to(directory).as_posix().lower()
         )
+        has_subfolders = any(f.parent != directory for f in image_files)
 
         for f in image_files:
             try:
@@ -174,7 +175,8 @@ class ImageListModel(QAbstractListModel):
                     w, h = 0, 0
             except Exception:
                 w, h = 0, 0
-            item = ImageItem(path=f, width=w, height=h)
+            rel = f.relative_to(directory).as_posix() if has_subfolders else ''
+            item = ImageItem(path=f, width=w, height=h, relative_path=rel)
             self.images.append(item)
 
         self.endResetModel()

@@ -172,7 +172,7 @@ class ImageFilterProxyModel(QSortFilterProxyModel):
         kind = term[0]
         if kind == 'text':
             needle = term[1].lower()
-            return (needle in image.filename.lower()
+            return (needle in image.display_name.lower()
                     or any(needle in t.lower() for t in image.tags))
         elif kind == 'tag':
             p = term[1].lower()
@@ -180,7 +180,7 @@ class ImageFilterProxyModel(QSortFilterProxyModel):
                 return any(fnmatchcase(t.lower(), p) for t in image.tags)
             return any(t.strip().lower() == p for t in image.tags)
         elif kind == 'name':
-            return self._wild(term[1], image.filename)
+            return self._wild(term[1], image.display_name)
         elif kind == 'path':
             return self._wild(term[1], str(image.path))
         elif kind == 'tags_num':

@@ -14,6 +14,7 @@ class ImageItem:
     tags: list[str] = field(default_factory=list)
     mask_path: Optional[Path] = None
     modified_path: Optional[Path] = None
+    relative_path: str = ''
     _thumbnail: object = field(default=None, repr=False)
 
     @property
@@ -23,6 +24,11 @@ class ImageItem:
     @property
     def filename(self) -> str:
         return self.path.name
+
+    @property
+    def display_name(self) -> str:
+        """Filename with subfolder prefix when loaded recursively."""
+        return self.relative_path if self.relative_path else self.path.name
 
     @property
     def suffix(self) -> str:
