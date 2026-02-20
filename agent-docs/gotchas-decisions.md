@@ -33,9 +33,17 @@ Temp dir keyed by MD5 hash of source directory path for stability.
 
 Labels stored in temp folder to avoid filename collision with caption `.txt` files. Both use `{imagename}.txt` pattern but different content.
 
-## Comparison Slider Direction
+## Comparison Slider — Layout
 
-Before image on top (Z=1), clipped from left edge. `slider_pos` 0.0 = all after (modified), 1.0 = all before (original). After image sits as base layer.
+Horizontal curtain wipe: left = before (original), right = after (modified). The divider line is at `slider_pos`:
+- `slider_pos` 0.0 = divider at left edge → all after (modified) visible
+- `slider_pos` 1.0 = divider at right edge → all before (original) visible
+
+Before image on top (Z=1), cropped from left edge (0 to `slider_pos * width`). After image sits as base layer (full, uncropped).
+
+## Comparison Slider — Image Size Mismatch
+
+Modified images may have different dimensions than originals (e.g., from ComfyUI workflows). `set_after()` and `set_images()` auto-scale the after image to match the before image's dimensions using `IgnoreAspectRatio` + `SmoothTransformation`. Without this, the slider shows misaligned or clipped comparisons.
 
 ## WD Tagger: BGR Not RGB
 
@@ -52,3 +60,11 @@ Plugin modules have Qt widget settings panels. These widgets cannot be accessed 
 ## Spacebar Pan
 
 Canvas needs `StrongFocus` policy and `keyPressEvent`/`keyReleaseEvent` handlers. The label tab must call `canvas.setFocus()` after image switching so spacebar works immediately.
+
+## No Separate Eraser Tool
+
+There is no `Tool.ERASER` enum value. Erasing is handled by setting `DrawMode.ERASE` while using the Brush/Marker tool. The eraser mode is controlled by the draw mode selector in the Label tab UI, not by switching tools.
+
+## ModificationWorker — Module Unload
+
+After batch modification completes (or is cancelled), the worker calls `module.unload()` if it exists. This allows modules to free GPU memory (e.g., LaMa model). The `unload()` method is optional — not part of the ABC.

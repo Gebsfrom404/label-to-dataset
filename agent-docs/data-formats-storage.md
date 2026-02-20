@@ -22,6 +22,25 @@ labels_dir = get_temp_dir_no_clear(f'labels_{dir_hash}')
 - `cleanup_all_temp()` skips `labels_*` directories (they survive app restarts)
 - On load: checks temp dir first, falls back to in-place `.txt` for initial import
 
+## ImageItem Dataclass (`ltd/data/image_item.py`)
+
+```python
+@dataclass
+class ImageItem:
+    path: Path              # Original image path
+    width: int = 0
+    height: int = 0
+    labels: list[Label]     # YOLO labels
+    tags: list[str]         # Caption tags
+    mask_path: Path | None  # Binary mask path
+    modified_path: Path | None  # Modified image from Modify tab
+```
+
+Key properties:
+- `display_path` → returns `modified_path` if available, else `path` (used for showing current state)
+- `caption_path` → `path.with_suffix('.txt')` (caption file location)
+- `load_tags_from_file()` / `save_tags_to_file()` — read/write comma-separated tags
+
 ## Masks
 
 Binary PNG files: white = labeled area, black = background.
@@ -54,6 +73,8 @@ QSettings('LabelToDataset', 'LabelToDataset')
 ```
 
 `DEFAULT_SETTINGS` in `ltd/settings.py` defines all keys with defaults. Auto-persisting widgets in `ltd/widgets/settings_widgets.py` bind directly to QSettings keys.
+
+Extras tab uses `extras/{script_stem}/{param_name}` keys for per-script parameter persistence.
 
 ## Undo System (Label Tab)
 

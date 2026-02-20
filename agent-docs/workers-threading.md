@@ -42,6 +42,15 @@ torch.cuda.empty_cache()  # if torch available
 | ModificationWorker | `modification_worker.py` | Batch image modification via plugin |
 | CaptionWorker | `caption_worker.py` | Batch captioning, emits `caption_complete(index, tags)` |
 | TrainingWorker | `training_worker.py` | YOLO training via ultralytics |
+| _ScriptWorker | `extras_tab.py` (inline) | Runs extras script `run()` in thread with progress callback |
+
+## Module Unload
+
+ModificationWorker calls `module.unload()` (if it exists) in a `finally` block after processing. This is optional — not part of the ABC — but allows modules to free GPU memory after batch work.
+
+## Extras _ScriptWorker
+
+The Extras tab has its own lightweight worker (`_ScriptWorker`) that doesn't extend `BaseWorker`. It takes a `run_func` and `params` dict, calls `run_func(params, progress_callback)` in a thread. The progress callback signature: `(current: int, total: int, message: str = '')`.
 
 ## Thread Safety Rules
 

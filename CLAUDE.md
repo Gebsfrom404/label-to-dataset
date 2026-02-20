@@ -13,7 +13,7 @@ No tests exist. PyTorch CUDA 12.1 installed separately via launcher.
 
 ## Overview
 
-PySide6 desktop app: **Label → Modify → Caption → Train YOLO** pipeline.
+PySide6 desktop app: **Label → Modify → Caption → Train YOLO → Extras** pipeline (5 tabs).
 Entry: `main.py` → `ltd/app.py` → `ltd/main_window.py`. Plugins in `modules/`.
 
 ## Agent Docs
