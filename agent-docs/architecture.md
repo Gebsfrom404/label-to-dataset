@@ -32,6 +32,8 @@ Each tab is a QWidget in `ltd/tabs/`. MainWindow holds them in a QTabWidget and 
 | Loading dialog | `ltd/widgets/loading_dialog.py` | Frameless modal dialog with indeterminate progress bar |
 | Label image list | `ltd/widgets/label_image_list.py` | Image list with filter proxy (by label count, class, filename) |
 | Caption image list | `ltd/widgets/caption_image_list.py` | Image list with filter, multi-select, context menu |
+| Tag dictionary | `ltd/data/tag_dictionary.py` | CSV tag database loader (danbooru/e621), category colors, autocomplete search |
+| Tag completer popup | `ltd/widgets/tag_completer_popup.py` | Custom autocomplete popup with colored tags and post counts |
 | Workflow selector | `ltd/widgets/workflow_selector.py` | Dropdown for ComfyUI `.json` workflows with validation |
 | Find & replace | `ltd/dialogs/find_replace_dialog.py` | Find/replace dialog for caption tags |
 | Batch reorder | `ltd/dialogs/batch_reorder_dialog.py` | Batch reorder tags dialog |

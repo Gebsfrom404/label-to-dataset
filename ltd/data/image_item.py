@@ -37,15 +37,17 @@ class ImageItem:
     def caption_path(self) -> Path:
         return self.path.with_suffix('.txt')
 
-    def load_tags_from_file(self):
+    def load_tags_from_file(self, separator: str = ', '):
         """Load tags from the caption .txt file if it exists."""
         if self.caption_path.exists():
             text = self.caption_path.read_text(encoding='utf-8').strip()
             if text:
-                self.tags = [t.strip() for t in text.split(',') if t.strip()]
+                self.tags = [t.strip() for t in text.split(separator.strip() or separator)
+                             if t.strip()]
             else:
                 self.tags = []
 
-    def save_tags_to_file(self):
+    def save_tags_to_file(self, separator: str = ', '):
         """Save tags to the caption .txt file."""
-        self.caption_path.write_text(', '.join(self.tags), encoding='utf-8')
+        self.caption_path.write_text(
+            separator.join(self.tags), encoding='utf-8')

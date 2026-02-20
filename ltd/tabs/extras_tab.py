@@ -6,7 +6,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal, QThread
 from PySide6.QtWidgets import (
-    QCheckBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
+    QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
     QProgressBar, QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 EXTRAS_DIR = Path(__file__).resolve().parents[2] / 'extras_scripts'
 
 REQUIRED_PARAM_KEYS = {'name', 'type', 'label', 'default'}
-VALID_PARAM_TYPES = {'str', 'bool', 'folder'}
+VALID_PARAM_TYPES = {'str', 'bool', 'folder', 'combo'}
 
 
 class _ScriptWorker(QThread):
@@ -188,6 +188,21 @@ class ExtrasTab(QWidget):
                 panel.content_layout.addLayout(row)
                 param_widgets[name] = le
 
+            elif ptype == 'combo':
+                lbl = QLabel(param['label'])
+                panel.content_layout.addWidget(lbl)
+                combo = QComboBox()
+                combo.addItems(param.get('options', []))
+                saved = self._settings.value(key)
+                if saved is not None and saved in param.get('options', []):
+                    combo.setCurrentText(saved)
+                elif param.get('default'):
+                    combo.setCurrentText(str(param['default']))
+                combo.currentTextChanged.connect(
+                    lambda val, _k=key: self._settings.setValue(_k, val))
+                panel.content_layout.addWidget(combo)
+                param_widgets[name] = combo
+
             else:  # str
                 lbl = QLabel(param['label'])
                 panel.content_layout.addWidget(lbl)
@@ -245,6 +260,8 @@ class ExtrasTab(QWidget):
             widget = param_widgets[name]
             if p['type'] == 'bool':
                 values[name] = widget.isChecked()
+            elif p['type'] == 'combo':
+                values[name] = widget.currentText()
             else:
                 values[name] = widget.text()
         return values

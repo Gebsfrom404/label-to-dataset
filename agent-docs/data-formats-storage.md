@@ -39,7 +39,7 @@ class ImageItem:
 Key properties:
 - `display_path` → returns `modified_path` if available, else `path` (used for showing current state)
 - `caption_path` → `path.with_suffix('.txt')` (caption file location)
-- `load_tags_from_file()` / `save_tags_to_file()` — read/write comma-separated tags
+- `load_tags_from_file(separator=', ')` / `save_tags_to_file(separator=', ')` — read/write tags with configurable separator
 
 ## Masks
 
@@ -51,9 +51,18 @@ Binary PNG files: white = labeled area, black = background.
 
 ## Captions
 
-Plain `.txt` files with comma-separated tags, stored alongside images.
-- Saved by Caption tab's "Save All Captions" or "Export Images + Captions..."
-- Internal tag separator configurable via `tag_separator` setting
+Plain `.txt` files with tags, stored alongside images.
+- Separator configurable in Caption tab UI (default: `, `). Supports escape sequences (`\n`, `\t`).
+- Auto-saved to disk on every tag edit (no manual save needed, but "Save All" still available)
+- Undo/redo per-image (Ctrl+Z / Ctrl+Y) with snapshot-based stacks
+- Tag dictionary from `tags.csv` (danbooru/e621 CSV format) provides autocomplete and category colors
+
+## Tag Dictionary (`tags.csv`)
+
+CSV format: `tag_name,category_id,post_count,"aliases"`. Loaded by `ltd/data/tag_dictionary.py`.
+- Categories: 0=General, 1=Artist, 3=Copyright, 4=Character, 5=Meta (each has dark/light theme colors)
+- Populated via Extras tab script `populate_tags.py` from bundled reference CSVs
+- Used for autocomplete popup (`ltd/widgets/tag_completer_popup.py`) and tag coloring in lists
 
 ## Temp Folder Management (`ltd/utils/file_utils.py`)
 
@@ -82,3 +91,12 @@ Per-image undo stacks: `_undo_stacks[image_path] = [snapshot, ...]`
 - `_push_undo()` called before every label mutation (deep copy of labels + mask)
 - Ctrl+Z pops and restores
 - Stacks are keyed by image path, persist while folder is open
+
+## Undo System (Caption Tab)
+
+Per-image undo/redo stacks: `_undo_stacks[image_index] = [tag_list_snapshot, ...]`
+- Pre-snapshot strategy: `_pre_tags_snapshot` captured on image switch, pushed to undo on mutation
+- Bulk ops (find/replace, batch reorder, rename, etc.) push undo per affected image
+- `_skip_snapshot` flag prevents double-pushing when programmatically setting tags
+- Ctrl+Z / Ctrl+Y (or Ctrl+Shift+Z), max 50 undo levels per image
+- Stacks cleared on directory load
