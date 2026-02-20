@@ -64,6 +64,7 @@ class ImageListModel(QAbstractListModel):
     def __init__(self, thumbnail_width: int = 160, parent=None):
         super().__init__(parent)
         self.images: list[ImageItem] = []
+        self.root_directory: Path | None = None
         self.thumbnail_width = thumbnail_width
         self._thumbnail_cache: dict[str, QPixmap] = {}
         self._placeholder: QPixmap | None = None
@@ -155,6 +156,8 @@ class ImageListModel(QAbstractListModel):
         self.beginResetModel()
         self.images.clear()
         self._thumbnail_cache.clear()
+
+        self.root_directory = directory
 
         if not directory.exists():
             self.endResetModel()

@@ -505,6 +505,14 @@ class CaptionImageList(QWidget):
             return
         dest_path = Path(dest)
         rows = self.selected_source_rows()
+        root = self.model.root_directory
+        dest_inside_root = False
+        if root:
+            try:
+                dest_path.relative_to(root)
+                dest_inside_root = True
+            except ValueError:
+                pass
         for img in images:
             try:
                 shutil.move(str(img.path), dest_path / img.filename)
@@ -515,9 +523,18 @@ class CaptionImageList(QWidget):
                 QMessageBox.critical(
                     self, 'Error', f'Failed to move {img.filename}: {e}')
                 return
-        self.model.remove_rows(rows)
+        if dest_inside_root:
+            for i, img in enumerate(images):
+                old_key = str(img.path)
+                new_path = dest_path / img.filename
+                img.path = new_path
+                img.relative_path = new_path.relative_to(root).as_posix()
+                self.model._thumbnail_cache.pop(old_key, None)
+                self.model.invalidate_thumbnail(rows[i])
+        else:
+            self.model.remove_rows(rows)
+            self.images_deleted.emit()
         self._update_counter()
-        self.images_deleted.emit()
 
     def _copy_images_to(self):
         images = self.get_selected_images()
