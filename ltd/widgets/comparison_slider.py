@@ -41,11 +41,24 @@ class ComparisonSlider(QGraphicsView):
         self._rebuild()
 
     def set_after(self, pixmap: QPixmap):
+        # Scale to match before dimensions if they differ
+        if (self._before_pixmap and
+                (pixmap.width() != self._image_width or
+                 pixmap.height() != self._image_height)):
+            pixmap = pixmap.scaled(self._before_pixmap.size(),
+                                   Qt.AspectRatioMode.IgnoreAspectRatio,
+                                   Qt.TransformationMode.SmoothTransformation)
         self._after_pixmap = pixmap
         self._rebuild()
 
     def set_images(self, before: QPixmap, after: QPixmap):
         self._before_pixmap = before
+        # Scale after to match before dimensions so comparison is pixel-aligned
+        if (after.width() != before.width() or
+                after.height() != before.height()):
+            after = after.scaled(before.size(),
+                                 Qt.AspectRatioMode.IgnoreAspectRatio,
+                                 Qt.TransformationMode.SmoothTransformation)
         self._after_pixmap = after
         self._image_width = before.width()
         self._image_height = before.height()
