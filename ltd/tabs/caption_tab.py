@@ -196,6 +196,7 @@ class EditableTagsList(QListWidget):
     """Tags list with drag-drop reorder, inline editing, Delete key."""
     tags_changed = Signal()
     tags_delete_requested = Signal(list)  # list of tag strings
+    navigate_image = Signal(int)  # -1 = prev, +1 = next
 
     _HIGHLIGHT_BRUSH = QBrush(QColor(255, 200, 50, 70))
     _CLEAR_BRUSH = QBrush()
@@ -226,6 +227,22 @@ class EditableTagsList(QListWidget):
             if tags:
                 self.tags_delete_requested.emit(tags)
             return
+        if event.key() in (Qt.Key.Key_PageUp, Qt.Key.Key_PageDown):
+            direction = 1 if event.key() == Qt.Key.Key_PageDown else -1
+            self.navigate_image.emit(direction)
+            event.accept()
+            return
+        if event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down):
+            current = self.currentRow()
+            count = self.count()
+            if event.key() == Qt.Key.Key_Up and current <= 0:
+                self.navigate_image.emit(-1)
+                event.accept()
+                return
+            if event.key() == Qt.Key.Key_Down and current >= count - 1:
+                self.navigate_image.emit(1)
+                event.accept()
+                return
         super().keyPressEvent(event)
 
     def get_tags(self) -> list[str]:
@@ -365,6 +382,9 @@ class TagInputField(QLineEdit):
     popup_navigate = Signal(int)   # -1 = up, +1 = down
     popup_confirm = Signal()
     popup_cancel = Signal()
+    page_navigate = Signal(int)    # -1 = prev image, +1 = next image
+    undo_requested = Signal()
+    redo_requested = Signal()
 
     def keyPressEvent(self, event):
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
@@ -373,11 +393,26 @@ class TagInputField(QLineEdit):
         if event.key() == Qt.Key.Key_Escape:
             self.popup_cancel.emit()
             return
+        # Ctrl+Z / Ctrl+Y → app-level undo/redo (not QLineEdit undo)
+        if (event.key() == Qt.Key.Key_Z
+                and event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+            self.undo_requested.emit()
+            return
+        if (event.key() == Qt.Key.Key_Y
+                and event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+            self.redo_requested.emit()
+            return
         if event.key() == Qt.Key.Key_Down:
             self.popup_navigate.emit(1)
             return
         if event.key() == Qt.Key.Key_Up:
             self.popup_navigate.emit(-1)
+            return
+        if event.key() == Qt.Key.Key_PageDown:
+            self.page_navigate.emit(1)
+            return
+        if event.key() == Qt.Key.Key_PageUp:
+            self.page_navigate.emit(-1)
             return
         if event.key() == Qt.Key.Key_Tab:
             self.popup_confirm.emit()
@@ -392,6 +427,7 @@ class TagInputField(QLineEdit):
 
 class CaptionImageViewer(QGraphicsView):
     """Image viewer with auto-fit, Ctrl+scroll zoom, Space+drag pan."""
+    navigate_image = Signal(int)  # -1 = prev, +1 = next
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -445,6 +481,14 @@ class CaptionImageViewer(QGraphicsView):
         if (event.key() == Qt.Key.Key_0
                 and event.modifiers() & Qt.KeyboardModifier.ControlModifier):
             self._fit_image()
+            event.accept()
+            return
+        if event.key() in (Qt.Key.Key_PageDown, Qt.Key.Key_Down):
+            self.navigate_image.emit(1)
+            event.accept()
+            return
+        if event.key() in (Qt.Key.Key_PageUp, Qt.Key.Key_Up):
+            self.navigate_image.emit(-1)
             event.accept()
             return
         super().keyPressEvent(event)
@@ -735,6 +779,9 @@ class CaptionTab(QWidget):
         self.tag_input.popup_navigate.connect(self._on_popup_navigate)
         self.tag_input.popup_confirm.connect(self._on_popup_confirm)
         self.tag_input.popup_cancel.connect(self._tag_popup.hide_popup)
+        self.tag_input.page_navigate.connect(self._on_page_navigate)
+        self.tag_input.undo_requested.connect(self._undo)
+        self.tag_input.redo_requested.connect(self._redo)
         self._tag_popup.tag_selected.connect(self._on_popup_tag_selected)
 
         # Tag list actions
@@ -743,6 +790,10 @@ class CaptionTab(QWidget):
         self.remove_dupes_btn.clicked.connect(self._remove_duplicates_current)
         self.tags_list.tags_changed.connect(self._on_tags_list_changed)
         self.tags_list.tags_delete_requested.connect(self._handle_tag_delete)
+        self.tags_list.navigate_image.connect(self._on_page_navigate)
+
+        # Image viewer navigation
+        self.image_viewer.navigate_image.connect(self._on_page_navigate)
 
         # All tags
         self.all_tags_filter.textChanged.connect(self._update_all_tags_display)
@@ -822,6 +873,12 @@ class CaptionTab(QWidget):
         next_sc = QShortcut(QKeySequence(Qt.Key.Key_Right), self)
         next_sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         next_sc.activated.connect(self._navigate_next)
+
+        # PgUp/PgDown — always navigate images
+        pgup_sc = QShortcut(QKeySequence('PgUp'), self)
+        pgup_sc.activated.connect(lambda: self._on_page_navigate(-1))
+        pgdn_sc = QShortcut(QKeySequence('PgDown'), self)
+        pgdn_sc.activated.connect(lambda: self._on_page_navigate(1))
 
     def _navigate_previous(self):
         focus = QApplication.focusWidget()
@@ -1160,13 +1217,46 @@ class CaptionTab(QWidget):
         self._tag_popup.show_for(self.tag_input, text, current_tags, dark=dark)
 
     def _on_popup_navigate(self, direction: int):
-        """Handle Up/Down in tag input for popup navigation."""
-        if not self._tag_popup.isVisible():
+        """Handle Up/Down in tag input for popup or tags list navigation."""
+        if self._tag_popup.isVisible():
+            if direction > 0:
+                self._tag_popup.select_next()
+            else:
+                self._tag_popup.select_previous()
             return
+        # Navigate through image tags list
+        count = self.tags_list.count()
+        if count == 0:
+            # No tags — move to prev/next image
+            if direction > 0:
+                self.image_list.go_to_next()
+            else:
+                self.image_list.go_to_previous()
+            return
+        current = self.tags_list.currentRow()
+        if direction > 0:  # Down
+            if current < count - 1:
+                nxt = current + 1 if current >= 0 else 0
+                self.tags_list.setCurrentRow(nxt)
+                self.tags_list.scrollToItem(self.tags_list.item(nxt))
+            else:
+                # Past last tag — next image
+                self.image_list.go_to_next()
+        else:  # Up
+            if current > 0:
+                self.tags_list.setCurrentRow(current - 1)
+                self.tags_list.scrollToItem(
+                    self.tags_list.item(current - 1))
+            else:
+                # First tag or no selection — previous image
+                self.image_list.go_to_previous()
+
+    def _on_page_navigate(self, direction: int):
+        """Handle PgUp/PgDown — always move to prev/next image."""
         if direction > 0:
-            self._tag_popup.select_next()
+            self.image_list.go_to_next()
         else:
-            self._tag_popup.select_previous()
+            self.image_list.go_to_previous()
 
     def _on_popup_confirm(self):
         """Handle Enter/Tab in tag input — select from popup or submit."""
@@ -1177,18 +1267,9 @@ class CaptionTab(QWidget):
             self.tag_input.clear()
 
     def _on_popup_tag_selected(self, tag: str):
-        """Insert tag from popup into the tags list."""
-        self.tag_input.clear()
-        # Add the tag
-        image = self.model.get_image(self._current_image_index)
-        if image and tag not in image.tags:
-            item = QListWidgetItem(tag)
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
-            self.tags_list._apply_tag_color(item, tag)
-            self.tags_list.addItem(item)
-            self.tags_list.scrollToBottom()
-            self.tags_list.setCurrentRow(self.tags_list.count() - 1)
-            self._on_tags_list_changed()
+        """Insert tag from popup into the tags list (respects multi-select)."""
+        self.tag_input.setText(tag)
+        self._add_tag()
         self.tag_input.setFocus()
 
     def _add_tag(self):

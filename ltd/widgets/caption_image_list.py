@@ -25,14 +25,14 @@ class NavigableListView(QListView):
     """QListView that also navigates with W (up) and S (down) keys."""
 
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key.Key_W:
+        if event.key() in (Qt.Key.Key_W, Qt.Key.Key_A, Qt.Key.Key_PageUp):
             current = self.currentIndex()
             if current.isValid() and current.row() > 0:
                 new_idx = self.model().index(current.row() - 1, 0)
                 self.setCurrentIndex(new_idx)
             event.accept()
             return
-        if event.key() == Qt.Key.Key_S:
+        if event.key() in (Qt.Key.Key_S, Qt.Key.Key_D, Qt.Key.Key_PageDown):
             current = self.currentIndex()
             if current.isValid() and current.row() < self.model().rowCount() - 1:
                 new_idx = self.model().index(current.row() + 1, 0)

@@ -271,6 +271,10 @@ class LabelTab(QWidget):
             self.image_list.go_to_previous)
         QShortcut(QKeySequence('D'), self).activated.connect(
             self.image_list.go_to_next)
+        QShortcut(QKeySequence('PgUp'), self).activated.connect(
+            self.image_list.go_to_previous)
+        QShortcut(QKeySequence('PgDown'), self).activated.connect(
+            self.image_list.go_to_next)
         QShortcut(QKeySequence('W'), self).activated.connect(
             self._next_class)
         QShortcut(QKeySequence('S'), self).activated.connect(

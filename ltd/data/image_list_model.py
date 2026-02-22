@@ -196,6 +196,17 @@ class ImageListModel(QAbstractListModel):
         self.images_loaded.emit()
         self._start_thumbnail_worker()
 
+    def insert_items(self, position: int, items: list[ImageItem]):
+        """Insert new ImageItems at the given position."""
+        if not items:
+            return
+        position = max(0, min(position, len(self.images)))
+        self.beginInsertRows(QModelIndex(), position, position + len(items) - 1)
+        for i, item in enumerate(items):
+            self.images.insert(position + i, item)
+        self.endInsertRows()
+        self._start_thumbnail_worker()
+
     def get_image(self, index: int) -> ImageItem | None:
         if 0 <= index < len(self.images):
             return self.images[index]

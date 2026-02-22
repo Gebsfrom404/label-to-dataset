@@ -4,15 +4,16 @@ from collections import OrderedDict
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QPixmap
-from PySide6.QtWidgets import (QFileDialog, QGroupBox, QHBoxLayout, QLabel,
-                               QMessageBox, QProgressBar, QPushButton,
+from PySide6.QtGui import QKeyEvent, QPixmap
+from PySide6.QtWidgets import (QButtonGroup, QFileDialog, QGroupBox,
+                               QHBoxLayout, QLabel, QMessageBox, QProgressBar,
+                               QPushButton, QRadioButton, QSlider, QSpinBox,
                                QSplitter, QVBoxLayout, QWidget)
 
 from ltd.data.image_item import ImageItem
 from ltd.data.image_list_model import IMAGE_EXTENSIONS, ImageListModel
 from ltd.data.label_data import DEFAULT_COLORS
-from ltd.utils.file_utils import get_temp_dir
+from ltd.utils.file_utils import get_temp_dir, get_temp_dir_no_clear
 from ltd.utils.image_utils import load_pixmap_preview
 from ltd.widgets.comparison_slider import ComparisonSlider
 from ltd.widgets.image_list_widget import ImageListWidget
@@ -56,7 +57,7 @@ class ModifyTab(QWidget):
         self.comparison = ComparisonSlider()
         splitter.addWidget(self.comparison)
 
-        # Right: Modifications + Output
+        # Right: Modifications + Tools + Output
         right_widget = QWidget()
         right_layout = QVBoxLayout(right_widget)
 
@@ -100,12 +101,72 @@ class ModifyTab(QWidget):
 
         right_layout.addWidget(mod_group)
 
+        # Tools group
+        tools_group = QGroupBox('Tools')
+        tools_layout = QVBoxLayout(tools_group)
+
+        # Crop row
+        crop_row = QHBoxLayout()
+        self.crop_toggle = QPushButton('Crop')
+        self.crop_toggle.setCheckable(True)
+        self.apply_crop_btn = QPushButton('Apply Crop')
+        self.apply_crop_btn.setEnabled(False)
+        crop_row.addWidget(self.crop_toggle)
+        crop_row.addWidget(self.apply_crop_btn)
+        tools_layout.addLayout(crop_row)
+
+        # Split row
+        split_row = QHBoxLayout()
+        self.split_toggle = QPushButton('Split')
+        self.split_toggle.setCheckable(True)
+        self.split_h_radio = QRadioButton('H')
+        self.split_v_radio = QRadioButton('V')
+        self.split_v_radio.setChecked(True)
+        self.split_orientation_group = QButtonGroup(self)
+        self.split_orientation_group.addButton(self.split_h_radio)
+        self.split_orientation_group.addButton(self.split_v_radio)
+        split_row.addWidget(self.split_toggle)
+        split_row.addWidget(self.split_h_radio)
+        split_row.addWidget(self.split_v_radio)
+        tools_layout.addLayout(split_row)
+
+        # Split position slider + spinbox
+        split_pos_row = QHBoxLayout()
+        split_pos_row.addWidget(QLabel('Pos:'))
+        self.split_slider = QSlider(Qt.Orientation.Horizontal)
+        self.split_slider.setRange(0, 1000)
+        self.split_slider.setValue(500)
+        self.split_spinbox = QSpinBox()
+        self.split_spinbox.setRange(0, 100)
+        self.split_spinbox.setValue(50)
+        self.split_spinbox.setSuffix('%')
+        split_pos_row.addWidget(self.split_slider)
+        split_pos_row.addWidget(self.split_spinbox)
+        tools_layout.addLayout(split_pos_row)
+
+        self.apply_split_btn = QPushButton('Apply Split')
+        self.apply_split_btn.setEnabled(False)
+        tools_layout.addWidget(self.apply_split_btn)
+
+        # Restore original row
+        restore_row = QHBoxLayout()
+        self.restore_current_btn = QPushButton('Restore Current')
+        self.restore_all_btn = QPushButton('Restore All')
+        restore_row.addWidget(self.restore_current_btn)
+        restore_row.addWidget(self.restore_all_btn)
+        tools_layout.addLayout(restore_row)
+
+        right_layout.addWidget(tools_group)
+
         # Output
         output_group = QGroupBox('Output')
         output_layout = QVBoxLayout(output_group)
 
         self.save_modified_btn = QPushButton('Save Modified Images...')
         output_layout.addWidget(self.save_modified_btn)
+
+        self.save_in_place_btn = QPushButton('Save Modified In Place')
+        output_layout.addWidget(self.save_in_place_btn)
 
         self.copy_caption_btn = QPushButton('Copy to Caption')
         output_layout.addWidget(self.copy_caption_btn)
@@ -116,6 +177,15 @@ class ModifyTab(QWidget):
         splitter.addWidget(right_widget)
         splitter.setSizes([200, 600, 300])
         layout.addWidget(splitter)
+
+    def keyPressEvent(self, event: QKeyEvent):
+        key = event.key()
+        if key in (Qt.Key.Key_A, Qt.Key.Key_PageUp):
+            self.image_list.go_to_previous()
+        elif key in (Qt.Key.Key_D, Qt.Key.Key_PageDown):
+            self.image_list.go_to_next()
+        else:
+            super().keyPressEvent(event)
 
     def _connect_signals(self):
         self.image_list.current_changed.connect(self._on_image_changed)
@@ -132,7 +202,24 @@ class ModifyTab(QWidget):
         self.cancel_btn.clicked.connect(self._cancel_modification)
 
         self.save_modified_btn.clicked.connect(self._save_modified)
+        self.save_in_place_btn.clicked.connect(self._save_modified_in_place)
         self.copy_caption_btn.clicked.connect(self._copy_to_caption)
+
+        self.restore_current_btn.clicked.connect(self._restore_current)
+        self.restore_all_btn.clicked.connect(self._restore_all)
+
+        # Tools
+        self.crop_toggle.toggled.connect(self._on_crop_toggled)
+        self.apply_crop_btn.clicked.connect(self._apply_crop)
+
+        self.split_toggle.toggled.connect(self._on_split_toggled)
+        self.split_orientation_group.buttonToggled.connect(
+            self._on_split_orientation_changed)
+        self.split_slider.valueChanged.connect(self._on_split_slider_changed)
+        self.split_spinbox.valueChanged.connect(self._on_split_spinbox_changed)
+        self.apply_split_btn.clicked.connect(self._apply_split)
+
+        self.comparison.split_pos_changed.connect(self._on_split_pos_from_view)
 
     def load_from_label_tab(self, items: list[ImageItem],
                            colors: list[str] | None = None):
@@ -350,6 +437,224 @@ class ModifyTab(QWidget):
     def _on_mod_error(self, msg):
         QMessageBox.critical(self, 'Modification Error', msg)
 
+    # --- Tools: Crop ---
+
+    def _on_crop_toggled(self, checked: bool):
+        if checked and self.split_toggle.isChecked():
+            self.split_toggle.setChecked(False)
+        self.apply_crop_btn.setEnabled(checked)
+        self.comparison.set_crop_mode(checked)
+
+    def _apply_crop(self):
+        from PIL import Image
+        image = self.model.get_image(self._current_image_index)
+        if image is None:
+            return
+
+        x, y, w, h = self.comparison.get_crop_rect()
+        if w <= 0 or h <= 0:
+            QMessageBox.information(self, 'Info', 'Invalid crop area.')
+            return
+
+        # Need to scale crop rect from preview coords to actual image coords
+        source_path = image.modified_path if image.modified_path else image.path
+        pil_img = Image.open(str(source_path))
+        actual_w, actual_h = pil_img.size
+
+        # The preview pixmap may be scaled - get the scale factor
+        max_dim = self._preview_max_dim()
+        preview_scale = min(max_dim / actual_w, max_dim / actual_h, 1.0)
+        # Scale crop coords back to actual image coords
+        ax = int(x / preview_scale)
+        ay = int(y / preview_scale)
+        aw = int(w / preview_scale)
+        ah = int(h / preview_scale)
+        # Clamp
+        ax = max(0, min(ax, actual_w))
+        ay = max(0, min(ay, actual_h))
+        aw = min(aw, actual_w - ax)
+        ah = min(ah, actual_h - ay)
+
+        if aw <= 0 or ah <= 0:
+            QMessageBox.information(self, 'Info', 'Crop area too small.')
+            return
+
+        temp_dir = get_temp_dir_no_clear('crop')
+        cropped = pil_img.crop((ax, ay, ax + aw, ay + ah))
+        out_path = temp_dir / f'{image.name}_cropped{image.suffix}'
+        cropped.save(str(out_path))
+        pil_img.close()
+
+        # Crop mask if exists
+        if image.mask_path and image.mask_path.exists():
+            mask_img = Image.open(str(image.mask_path))
+            # Scale mask to match actual image if needed
+            if mask_img.size != (actual_w, actual_h):
+                mask_img = mask_img.resize((actual_w, actual_h), Image.NEAREST)
+            mask_cropped = mask_img.crop((ax, ay, ax + aw, ay + ah))
+            mask_out = temp_dir / f'{image.name}_cropped-masklabel.png'
+            mask_cropped.save(str(mask_out))
+            image.mask_path = mask_out
+            mask_img.close()
+
+        # Update image
+        image.modified_path = out_path
+        image.width = aw
+        image.height = ah
+        self._pixmap_cache.pop(str(source_path), None)
+        self._pixmap_cache.pop(str(out_path), None)
+        self.model.invalidate_thumbnail(self._current_image_index)
+
+        # Disable crop mode
+        self.crop_toggle.setChecked(False)
+        self._on_image_changed(self._current_image_index)
+        self.mod_status.setText(f'Cropped to {aw}x{ah}')
+
+    # --- Tools: Split ---
+
+    def _on_split_toggled(self, checked: bool):
+        if checked and self.crop_toggle.isChecked():
+            self.crop_toggle.setChecked(False)
+        self.apply_split_btn.setEnabled(checked)
+        orientation = 'H' if self.split_h_radio.isChecked() else 'V'
+        self.comparison.set_split_mode(checked, orientation)
+
+    def _on_split_orientation_changed(self):
+        if self.split_toggle.isChecked():
+            orientation = 'H' if self.split_h_radio.isChecked() else 'V'
+            self.comparison.set_split_mode(True, orientation)
+
+    def _on_split_slider_changed(self, value: int):
+        self.split_spinbox.blockSignals(True)
+        self.split_spinbox.setValue(value // 10)
+        self.split_spinbox.blockSignals(False)
+        if self.split_toggle.isChecked():
+            self.comparison.set_split_pos(value / 1000.0)
+
+    def _on_split_spinbox_changed(self, value: int):
+        self.split_slider.blockSignals(True)
+        self.split_slider.setValue(value * 10)
+        self.split_slider.blockSignals(False)
+        if self.split_toggle.isChecked():
+            self.comparison.set_split_pos(value / 100.0)
+
+    def _on_split_pos_from_view(self, pos: float):
+        """Sync UI controls when split line is dragged in the view."""
+        self.split_slider.blockSignals(True)
+        self.split_spinbox.blockSignals(True)
+        self.split_slider.setValue(int(pos * 1000))
+        self.split_spinbox.setValue(int(pos * 100))
+        self.split_slider.blockSignals(False)
+        self.split_spinbox.blockSignals(False)
+
+    def _apply_split(self):
+        from PIL import Image
+        image = self.model.get_image(self._current_image_index)
+        if image is None:
+            return
+
+        split_pos = self.comparison.get_split_pos()
+        orientation = 'H' if self.split_h_radio.isChecked() else 'V'
+
+        source_path = image.modified_path if image.modified_path else image.path
+        pil_img = Image.open(str(source_path))
+        actual_w, actual_h = pil_img.size
+
+        temp_dir = get_temp_dir_no_clear('split')
+        stem = image.name
+        ext = image.suffix
+
+        if orientation == 'V':
+            split_x = int(split_pos * actual_w)
+            split_x = max(1, min(split_x, actual_w - 1))
+            part1 = pil_img.crop((0, 0, split_x, actual_h))
+            part2 = pil_img.crop((split_x, 0, actual_w, actual_h))
+            sizes = [(split_x, actual_h), (actual_w - split_x, actual_h)]
+        else:
+            split_y = int(split_pos * actual_h)
+            split_y = max(1, min(split_y, actual_h - 1))
+            part1 = pil_img.crop((0, 0, actual_w, split_y))
+            part2 = pil_img.crop((0, split_y, actual_w, actual_h))
+            sizes = [(actual_w, split_y), (actual_w, actual_h - split_y)]
+
+        path1 = temp_dir / f'{stem}_part1{ext}'
+        path2 = temp_dir / f'{stem}_part2{ext}'
+        part1.save(str(path1))
+        part2.save(str(path2))
+        pil_img.close()
+
+        # Split mask if exists
+        mask_path1 = None
+        mask_path2 = None
+        if image.mask_path and image.mask_path.exists():
+            mask_img = Image.open(str(image.mask_path))
+            if mask_img.size != (actual_w, actual_h):
+                mask_img = mask_img.resize((actual_w, actual_h), Image.NEAREST)
+            if orientation == 'V':
+                m1 = mask_img.crop((0, 0, split_x, actual_h))
+                m2 = mask_img.crop((split_x, 0, actual_w, actual_h))
+            else:
+                m1 = mask_img.crop((0, 0, actual_w, split_y))
+                m2 = mask_img.crop((0, split_y, actual_w, actual_h))
+            mask_path1 = temp_dir / f'{stem}_part1-masklabel.png'
+            mask_path2 = temp_dir / f'{stem}_part2-masklabel.png'
+            m1.save(str(mask_path1))
+            m2.save(str(mask_path2))
+            mask_img.close()
+
+        # Create new ImageItems
+        item1 = ImageItem(path=path1, width=sizes[0][0], height=sizes[0][1],
+                          mask_path=mask_path1)
+        item2 = ImageItem(path=path2, width=sizes[1][0], height=sizes[1][1],
+                          mask_path=mask_path2)
+
+        # Insert after current
+        insert_pos = self._current_image_index + 1
+        self.model.insert_items(insert_pos, [item1, item2])
+
+        # Disable split mode and select first new part
+        self.split_toggle.setChecked(False)
+        self.image_list.select_index(insert_pos)
+        self.mod_status.setText(
+            f'Split into {sizes[0][0]}x{sizes[0][1]} + '
+            f'{sizes[1][0]}x{sizes[1][1]}')
+
+    # --- Restore ---
+
+    def _restore_current(self):
+        image = self.model.get_image(self._current_image_index)
+        if image is None or not image.modified_path:
+            QMessageBox.information(self, 'Info', 'Current image has no modifications.')
+            return
+        self._pixmap_cache.pop(str(image.modified_path), None)
+        self._pixmap_cache.pop(str(image.path), None)
+        image.modified_path = None
+        self.model.invalidate_thumbnail(self._current_image_index)
+        self._on_image_changed(self._current_image_index)
+        self.mod_status.setText('Restored original image')
+
+    def _restore_all(self):
+        modified = [img for img in self.model.images if img.modified_path]
+        if not modified:
+            QMessageBox.information(self, 'Info', 'No modified images to restore.')
+            return
+        reply = QMessageBox.question(
+            self, 'Restore All',
+            f'Discard modifications for {len(modified)} image(s)?',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        for image in modified:
+            self._pixmap_cache.pop(str(image.modified_path), None)
+            self._pixmap_cache.pop(str(image.path), None)
+            image.modified_path = None
+            idx = self.model.images.index(image)
+            self.model.invalidate_thumbnail(idx)
+        if self._current_image_index >= 0:
+            self._on_image_changed(self._current_image_index)
+        self.mod_status.setText(f'Restored {len(modified)} original images')
+
     # --- Output ---
 
     def _save_modified(self):
@@ -363,6 +668,44 @@ class ModifyTab(QWidget):
             shutil.copy2(source, out / image.filename)
             count += 1
         self.mod_status.setText(f'Saved {count} images to {folder}')
+
+    def _save_modified_in_place(self):
+        """Overwrite original files with their modified versions."""
+        modified = [img for img in self.model.images if img.modified_path]
+        if not modified:
+            QMessageBox.information(self, 'Info', 'No modified images to save.')
+            return
+
+        reply = QMessageBox.warning(
+            self, 'Save Modified In Place',
+            f'This will overwrite {len(modified)} original image(s) with '
+            f'their modified versions. This cannot be undone.\n\n'
+            f'Continue?',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        count = 0
+        for image in modified:
+            try:
+                shutil.copy2(str(image.modified_path), str(image.path))
+                # Invalidate caches
+                self._pixmap_cache.pop(str(image.path), None)
+                self._pixmap_cache.pop(str(image.modified_path), None)
+                image.modified_path = None
+                idx = self.model.images.index(image)
+                self.model.invalidate_thumbnail(idx)
+                count += 1
+            except Exception as e:
+                QMessageBox.warning(
+                    self, 'Error',
+                    f'Failed to save {image.filename}: {e}')
+
+        # Refresh current view
+        if self._current_image_index >= 0:
+            self._on_image_changed(self._current_image_index)
+        self.mod_status.setText(f'Saved {count} modified images in place')
 
     def _copy_to_caption(self):
         temp_dir = get_temp_dir('caption')
