@@ -159,8 +159,10 @@ class LamaInpaintModule(BaseModificationModule):
         # RGB -> BGR for cv2.imwrite
         result = cv2.cvtColor(result, cv2.COLOR_RGB2BGR)
 
-        # Save result
-        output_path = image_path.parent / f'{image_path.stem}_inpainted.png'
+        # Save result to temp dir (not next to original)
+        from ltd.utils.file_utils import get_temp_dir_no_clear
+        output_dir = get_temp_dir_no_clear('lama_output')
+        output_path = output_dir / f'{image_path.stem}_inpainted.png'
         cv2.imwrite(str(output_path), result)
         return output_path
 

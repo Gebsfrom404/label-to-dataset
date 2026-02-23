@@ -37,7 +37,9 @@ class CanvasWidget(QGraphicsView):
     label_selected = Signal(int)  # emits label index
     label_modified = Signal(int, object)  # emits (index, Label)
     mask_updated = Signal(object)  # emits DrawMode
+    drawing_started = Signal()  # emitted before first stroke of a draw action
     brush_size_changed = Signal(int)  # emits new brush size
+    split_pos_changed = Signal(float)  # emits split position 0..1
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -99,6 +101,22 @@ class CanvasWidget(QGraphicsView):
         # Spacebar pan: temporarily override to Hand tool
         self._space_held = False
         self._tool_before_space: Tool | None = None
+
+        # Crop overlay state
+        self._crop_mode = False
+        self._crop_rect = QRectF()
+        self._crop_border: QGraphicsRectItem | None = None
+        self._crop_handles: list[QGraphicsRectItem] = []
+        self._crop_dim_rects: list[QGraphicsRectItem] = []
+        self._crop_dragging_handle = -1
+        self._crop_min_size = 10
+
+        # Split overlay state
+        self._split_mode = False
+        self._split_orientation = 'V'
+        self._split_pos = 0.5
+        self._split_line: QGraphicsLineItem | None = None
+        self._split_dragging = False
 
     @property
     def current_tool(self) -> Tool:
@@ -166,6 +184,16 @@ class CanvasWidget(QGraphicsView):
         self._selected_label_index = -1
         self._dragging_handle = -1
         self._dragging_label = False
+
+        # Clear crop/split overlays
+        self._crop_mode = False
+        self._crop_border = None
+        self._crop_handles.clear()
+        self._crop_dim_rects.clear()
+        self._crop_dragging_handle = -1
+        self._split_mode = False
+        self._split_line = None
+        self._split_dragging = False
 
         self.scene_.clear()
 
@@ -352,11 +380,8 @@ class CanvasWidget(QGraphicsView):
             mask_arr = mask_from_qimage(self._mask_buffer)
             h, w = mask_arr.shape
             overlay = np.zeros((h, w, 4), dtype=np.uint8)
-            if self._draw_mode == DrawMode.ERASE:
-                color = QColor(255, 60, 60)  # Red tint for eraser
-            else:
-                color = QColor(self._class_colors[
-                    self._current_class_id % len(self._class_colors)])
+            color = QColor(self._class_colors[
+                self._current_class_id % len(self._class_colors)])
             mask_bool = mask_arr > 127
             overlay[mask_bool, 0] = color.blue()
             overlay[mask_bool, 1] = color.green()
@@ -424,11 +449,45 @@ class CanvasWidget(QGraphicsView):
                 self.verticalScrollBar().value() - delta)
 
     def mousePressEvent(self, event):
+        # Crop/split handle drag takes priority even in HAND mode
+        if (event.button() == Qt.MouseButton.LeftButton
+                and not self._space_held
+                and (self._crop_mode or self._split_mode)):
+            scene_pos = self.mapToScene(event.position().toPoint())
+            if self._crop_mode:
+                handle = self._hit_test_crop_handle(scene_pos)
+                if handle >= 0:
+                    self._crop_dragging_handle = handle
+                    return
+            if self._split_mode:
+                if not self._hit_test_split_line(scene_pos):
+                    # Snap split line to click position
+                    if self._split_orientation == 'V' and self._image_width > 0:
+                        self._split_pos = max(0.0, min(1.0, scene_pos.x() / self._image_width))
+                    elif self._split_orientation == 'H' and self._image_height > 0:
+                        self._split_pos = max(0.0, min(1.0, scene_pos.y() / self._image_height))
+                    self._update_split_line()
+                    self.split_pos_changed.emit(self._split_pos)
+                self._split_dragging = True
+                return
+
         if self._current_tool == Tool.HAND or self._space_held:
             super().mousePressEvent(event)
             return
 
         scene_pos = self.mapToScene(event.position().toPoint())
+
+        # Crop/split handle drag takes priority
+        if event.button() == Qt.MouseButton.LeftButton:
+            if self._crop_mode:
+                handle = self._hit_test_crop_handle(scene_pos)
+                if handle >= 0:
+                    self._crop_dragging_handle = handle
+                    return
+            if self._split_mode and self._hit_test_split_line(scene_pos):
+                self._split_dragging = True
+                return
+
         if not self._is_in_image(scene_pos):
             super().mousePressEvent(event)
             return
@@ -455,6 +514,21 @@ class CanvasWidget(QGraphicsView):
         # Always update brush cursor position
         self._move_brush_cursor(scene_pos)
 
+        # Crop/split dragging takes priority
+        if self._crop_dragging_handle >= 0:
+            self._move_crop_handle(self._crop_dragging_handle, scene_pos)
+            return
+        if self._split_dragging and self._image_width > 0:
+            if self._split_orientation == 'V':
+                self._split_pos = max(
+                    0.0, min(1.0, scene_pos.x() / self._image_width))
+            else:
+                self._split_pos = max(
+                    0.0, min(1.0, scene_pos.y() / self._image_height))
+            self._update_split_line()
+            self.split_pos_changed.emit(self._split_pos)
+            return
+
         if self._current_tool == Tool.HAND or self._space_held:
             super().mouseMoveEvent(event)
             return
@@ -471,6 +545,15 @@ class CanvasWidget(QGraphicsView):
             super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            # Release crop/split drag
+            if self._crop_dragging_handle >= 0:
+                self._crop_dragging_handle = -1
+                return
+            if self._split_dragging:
+                self._split_dragging = False
+                return
+
         if self._current_tool == Tool.HAND or self._space_held:
             super().mouseReleaseEvent(event)
             return
@@ -844,13 +927,15 @@ class CanvasWidget(QGraphicsView):
     # --- Freehand drawing (Brush) ---
 
     def _start_drawing(self, pos: QPointF, erase: bool = False):
+        self.drawing_started.emit()
         self._drawing = True
+        self._erase_drawing = erase
         self._draw_stroke_count = 0
         self._last_draw_pos = pos
-        self._draw_on_mask(pos, pos)
+        self._draw_on_mask(pos, pos, erase)
 
     def _continue_drawing(self, pos: QPointF, erase: bool = False):
-        self._draw_on_mask(self._last_draw_pos, pos)
+        self._draw_on_mask(self._last_draw_pos, pos, self._erase_drawing)
         self._last_draw_pos = pos
         self._draw_stroke_count += 1
         if self._draw_stroke_count % 6 == 0:
@@ -861,15 +946,203 @@ class CanvasWidget(QGraphicsView):
         self._update_mask_overlay_fast()
         self.mask_updated.emit(self._draw_mode)
 
-    def _draw_on_mask(self, from_pos: QPointF, to_pos: QPointF):
+    def _draw_on_mask(self, from_pos: QPointF, to_pos: QPointF,
+                      erase: bool = False):
         """Draw a continuous stroke between two points on the mask."""
         if self._mask_buffer is None:
             return
+        color = Qt.GlobalColor.black if erase else Qt.GlobalColor.white
         painter = QPainter(self._mask_buffer)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-        pen = QPen(Qt.GlobalColor.white, self._brush_size * 2,
+        pen = QPen(color, self._brush_size * 2,
                    Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
                    Qt.PenJoinStyle.RoundJoin)
         painter.setPen(pen)
         painter.drawLine(from_pos.toPoint(), to_pos.toPoint())
         painter.end()
+
+    # --- Crop overlay ---
+
+    def set_crop_mode(self, enabled: bool):
+        self._crop_mode = enabled
+        if enabled and self._image_width > 0:
+            self._crop_rect = QRectF(0, 0, self._image_width, self._image_height)
+            self._create_crop_overlay()
+        else:
+            self._remove_crop_overlay()
+        self.viewport().update()
+
+    def get_crop_rect(self) -> tuple[int, int, int, int]:
+        """Return (x, y, w, h) in image pixel coords."""
+        r = self._crop_rect
+        return (int(r.x()), int(r.y()), int(r.width()), int(r.height()))
+
+    def _create_crop_overlay(self):
+        self._remove_crop_overlay()
+        if self._image_width <= 0:
+            return
+        dim_brush = QBrush(QColor(0, 0, 0, 120))
+        for _ in range(4):
+            rect = QGraphicsRectItem()
+            rect.setBrush(dim_brush)
+            rect.setPen(QPen(Qt.PenStyle.NoPen))
+            rect.setZValue(8)
+            self.scene_.addItem(rect)
+            self._crop_dim_rects.append(rect)
+        border_pen = QPen(QColor(255, 255, 255), 2, Qt.PenStyle.DashLine)
+        self._crop_border = QGraphicsRectItem()
+        self._crop_border.setPen(border_pen)
+        self._crop_border.setBrush(QBrush(Qt.BrushStyle.NoBrush))
+        self._crop_border.setZValue(9)
+        self.scene_.addItem(self._crop_border)
+        handle_brush = QBrush(QColor(255, 255, 255))
+        handle_pen = QPen(QColor(0, 0, 0), 1)
+        for _ in range(8):
+            handle = QGraphicsRectItem(-5, -5, 10, 10)
+            handle.setBrush(handle_brush)
+            handle.setPen(handle_pen)
+            handle.setZValue(11)
+            handle.setFlag(
+                QGraphicsRectItem.GraphicsItemFlag.ItemIgnoresTransformations)
+            self.scene_.addItem(handle)
+            self._crop_handles.append(handle)
+        self._update_crop_overlay()
+
+    def _remove_crop_overlay(self):
+        for rect in self._crop_dim_rects:
+            if rect.scene():
+                self.scene_.removeItem(rect)
+        self._crop_dim_rects.clear()
+        if self._crop_border and self._crop_border.scene():
+            self.scene_.removeItem(self._crop_border)
+        self._crop_border = None
+        for handle in self._crop_handles:
+            if handle.scene():
+                self.scene_.removeItem(handle)
+        self._crop_handles.clear()
+
+    def _update_crop_overlay(self):
+        if not self._crop_border or self._image_width <= 0:
+            return
+        r = self._crop_rect
+        iw, ih = self._image_width, self._image_height
+        self._crop_border.setRect(r)
+        if len(self._crop_dim_rects) == 4:
+            self._crop_dim_rects[0].setRect(QRectF(0, 0, iw, r.top()))
+            self._crop_dim_rects[1].setRect(
+                QRectF(0, r.bottom(), iw, ih - r.bottom()))
+            self._crop_dim_rects[2].setRect(
+                QRectF(0, r.top(), r.left(), r.height()))
+            self._crop_dim_rects[3].setRect(
+                QRectF(r.right(), r.top(), iw - r.right(), r.height()))
+        positions = [
+            QPointF(r.left(), r.top()),
+            QPointF(r.center().x(), r.top()),
+            QPointF(r.right(), r.top()),
+            QPointF(r.left(), r.center().y()),
+            QPointF(r.right(), r.center().y()),
+            QPointF(r.left(), r.bottom()),
+            QPointF(r.center().x(), r.bottom()),
+            QPointF(r.right(), r.bottom()),
+        ]
+        for i, handle in enumerate(self._crop_handles):
+            handle.setPos(positions[i])
+
+    def _hit_test_crop_handle(self, scene_pos: QPointF) -> int:
+        if not self._crop_handles:
+            return -1
+        tolerance = 10
+        for i, handle in enumerate(self._crop_handles):
+            handle_view_pos = self.mapFromScene(handle.pos())
+            mouse_view_pos = self.mapFromScene(scene_pos)
+            dx = abs(handle_view_pos.x() - mouse_view_pos.x())
+            dy = abs(handle_view_pos.y() - mouse_view_pos.y())
+            if dx <= tolerance and dy <= tolerance:
+                return i
+        return -1
+
+    def _move_crop_handle(self, handle_idx: int, scene_pos: QPointF):
+        r = QRectF(self._crop_rect)
+        x = max(0, min(scene_pos.x(), self._image_width))
+        y = max(0, min(scene_pos.y(), self._image_height))
+        mn = self._crop_min_size
+        if handle_idx == 0:      # TL
+            r.setLeft(min(x, r.right() - mn))
+            r.setTop(min(y, r.bottom() - mn))
+        elif handle_idx == 1:    # TC
+            r.setTop(min(y, r.bottom() - mn))
+        elif handle_idx == 2:    # TR
+            r.setRight(max(x, r.left() + mn))
+            r.setTop(min(y, r.bottom() - mn))
+        elif handle_idx == 3:    # ML
+            r.setLeft(min(x, r.right() - mn))
+        elif handle_idx == 4:    # MR
+            r.setRight(max(x, r.left() + mn))
+        elif handle_idx == 5:    # BL
+            r.setLeft(min(x, r.right() - mn))
+            r.setBottom(max(y, r.top() + mn))
+        elif handle_idx == 6:    # BC
+            r.setBottom(max(y, r.top() + mn))
+        elif handle_idx == 7:    # BR
+            r.setRight(max(x, r.left() + mn))
+            r.setBottom(max(y, r.top() + mn))
+        r = r.intersected(QRectF(0, 0, self._image_width, self._image_height))
+        if r.width() >= mn and r.height() >= mn:
+            self._crop_rect = r
+            self._update_crop_overlay()
+
+    # --- Split overlay ---
+
+    def set_split_mode(self, enabled: bool, orientation: str = 'V'):
+        self._split_mode = enabled
+        self._split_orientation = orientation
+        if enabled:
+            self._create_split_line()
+        else:
+            if self._split_line and self._split_line.scene():
+                self.scene_.removeItem(self._split_line)
+            self._split_line = None
+        self.viewport().update()
+
+    def set_split_pos(self, pos: float):
+        self._split_pos = max(0.0, min(1.0, pos))
+        self._update_split_line()
+        self.viewport().update()
+
+    def get_split_pos(self) -> float:
+        return self._split_pos
+
+    def _create_split_line(self):
+        if self._split_line and self._split_line.scene():
+            self.scene_.removeItem(self._split_line)
+        pen = QPen(QColor(255, 0, 0), 2, Qt.PenStyle.DashLine)
+        self._split_line = QGraphicsLineItem()
+        self._split_line.setPen(pen)
+        self._split_line.setZValue(10)
+        self.scene_.addItem(self._split_line)
+        self._update_split_line()
+
+    def _update_split_line(self):
+        if not self._split_line or self._image_width <= 0:
+            return
+        if self._split_orientation == 'V':
+            x = self._split_pos * self._image_width
+            self._split_line.setLine(x, 0, x, self._image_height)
+        else:
+            y = self._split_pos * self._image_height
+            self._split_line.setLine(0, y, self._image_width, y)
+
+    def _hit_test_split_line(self, scene_pos: QPointF) -> bool:
+        if not self._split_line or self._image_width <= 0:
+            return False
+        tolerance = 10
+        if self._split_orientation == 'V':
+            line_x = self._split_pos * self._image_width
+            line_view = self.mapFromScene(QPointF(line_x, 0))
+            mouse_view = self.mapFromScene(scene_pos)
+            return abs(line_view.x() - mouse_view.x()) <= tolerance
+        else:
+            line_y = self._split_pos * self._image_height
+            line_view = self.mapFromScene(QPointF(0, line_y))
+            mouse_view = self.mapFromScene(scene_pos)
+            return abs(line_view.y() - mouse_view.y()) <= tolerance
