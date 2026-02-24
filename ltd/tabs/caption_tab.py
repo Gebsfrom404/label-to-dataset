@@ -360,6 +360,9 @@ class AllTagsList(QListWidget):
                 self.delete_tags_requested.emit([tag])
 
     def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_A and event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            self.selectAll()
+            return
         if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
             tags = []
             for idx in self.selectedIndexes():

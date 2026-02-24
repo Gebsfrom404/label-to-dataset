@@ -7,7 +7,7 @@ from pathlib import Path
 
 from PySide6.QtCore import (QFile, QModelIndex, QSize, QSortFilterProxyModel,
                              Qt, QUrl, Signal)
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog,
                                QLabel, QLineEdit, QListView, QMenu,
                                QMessageBox, QPushButton, QVBoxLayout,
@@ -274,9 +274,11 @@ class CaptionImageList(QWidget):
     def _setup_context_menu(self):
         self.context_menu = QMenu(self)
 
-        self._act_select_all = self.context_menu.addAction('Select All')
-        self._act_select_all.setShortcut('Ctrl+A')
+        self._act_select_all = self.context_menu.addAction('Select All\tCtrl+A')
         self._act_select_all.triggered.connect(self.list_view.selectAll)
+        sc_select_all = QShortcut(QKeySequence('Ctrl+A'), self.list_view)
+        sc_select_all.setContext(Qt.ShortcutContext.WidgetShortcut)
+        sc_select_all.activated.connect(self.list_view.selectAll)
 
         self._act_invert = self.context_menu.addAction('Invert Selection')
         self._act_invert.setShortcut('Ctrl+I')
