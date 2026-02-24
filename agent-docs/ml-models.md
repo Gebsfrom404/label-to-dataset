@@ -25,37 +25,27 @@ Mask dilation controlled by `mask_grow` setting (default 5px).
 
 Auto-captioning using SmilingWolf WD tagger models. Implemented in caption_tab.py.
 
-### Stack: timm + safetensors + PyTorch (NOT ONNX)
+### Stack: ONNX Runtime
 
-Originally used ONNX Runtime but migrated to native PyTorch for GPU support.
+Uses `onnxruntime.InferenceSession` for inference. This matches the original SmilingWolf model format and produces correct results.
 
 ```python
-model = timm.create_model(arch, pretrained=False, num_classes=num_classes)
-state_dict = load_file(str(model_path))  # safetensors
-model.load_state_dict(state_dict)
-model = model.to('cuda' if torch.cuda.is_available() else 'cpu')
+from onnxruntime import InferenceSession
+self._model = InferenceSession(str(model_path))
+probs = self._model.run([output_name], {input_name: arr})[0][0]
 ```
 
 ### Auto-download
 
-Models downloaded via `huggingface_hub.hf_hub_download()` to `models/caption/`. Files: `model.safetensors`, `config.json`, `selected_tags.csv`.
+Models downloaded via `huggingface_hub.hf_hub_download()` to `models/caption/`. Files: `model.onnx`, `selected_tags.csv`.
 
-### Preprocessing — BGR + Normalize
+### Preprocessing — BGR, no normalization
 
-**Critical**: SmilingWolf models were trained with OpenCV (BGR channel order), not RGB.
+**Critical**: SmilingWolf ONNX models expect BGR channel order (OpenCV convention) with raw float32 values (NOT normalized to [-1,1]).
 
 ```python
-# Resize to 448x448, convert to numpy
-arr = np.array(canvas, dtype=np.float32)
-
-# BGR flip (model trained on OpenCV BGR input)
-arr = arr[:, :, ::-1] / 255.0
-
-# Normalize to [-1, 1]  (mean=0.5, std=0.5)
-arr = (arr - 0.5) / 0.5
-
-# .copy() required because negative stride from [::-1] is not contiguous
-tensor = torch.from_numpy(arr.copy()).permute(2, 0, 1).unsqueeze(0)
+arr = np.array(canvas, dtype=np.float32)[:, :, ::-1]  # RGB→BGR
+arr = np.expand_dims(arr, axis=0)  # add batch dim (NHWC)
 ```
 
-Getting this wrong causes: wrong color tags (no BGR flip) or irrelevant tags (no normalization).
+Input dimension is read from the model: `self._model.get_inputs()[0].shape`.

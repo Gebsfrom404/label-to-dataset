@@ -41,11 +41,10 @@ from ltd.workers.caption_worker import CaptionWorker
 # ---------------------------------------------------------------------------
 
 class WdTaggerCaptioner:
-    """WD Tagger auto-captioning using timm + safetensors (GPU via PyTorch)."""
+    """WD Tagger auto-captioning using ONNX Runtime."""
 
     MODEL_REPO = 'SmilingWolf/wd-eva02-large-tagger-v3'
     MODELS_BASE = Path('./models/caption')
-    INPUT_SIZE = 448  # model's expected input resolution
 
     def __init__(self, min_probability: float = 0.35, max_tags: int = 50,
                  exclude_tags: list[str] | None = None):
@@ -54,7 +53,6 @@ class WdTaggerCaptioner:
         self.max_tags = max_tags
         self.exclude_tags = set(exclude_tags or [])
         self._model = None
-        self._device = None
         self._tags = []
         self._rating_indices = []
 
@@ -66,43 +64,25 @@ class WdTaggerCaptioner:
         if self._model is not None:
             return
 
-        import torch
-        import timm
         import huggingface_hub
-        from safetensors.torch import load_file
+        from onnxruntime import InferenceSession
 
         self.model_dir.mkdir(parents=True, exist_ok=True)
 
-        model_path = self.model_dir / 'model.safetensors'
+        model_path = self.model_dir / 'model.onnx'
         tags_path = self.model_dir / 'selected_tags.csv'
-        config_path = self.model_dir / 'config.json'
 
-        for fname, fpath in [('model.safetensors', model_path),
-                              ('selected_tags.csv', tags_path),
-                              ('config.json', config_path)]:
-            if not fpath.exists():
-                huggingface_hub.hf_hub_download(
-                    self.MODEL_REPO, filename=fname,
-                    local_dir=str(self.model_dir))
+        if not model_path.exists():
+            model_path = Path(huggingface_hub.hf_hub_download(
+                self.MODEL_REPO, filename='model.onnx',
+                local_dir=str(self.model_dir)))
 
-        import json
-        with open(config_path, 'r') as f:
-            config = json.load(f)
+        if not tags_path.exists():
+            tags_path = Path(huggingface_hub.hf_hub_download(
+                self.MODEL_REPO, filename='selected_tags.csv',
+                local_dir=str(self.model_dir)))
 
-        arch = config.get('architecture', 'eva02_large_patch14_448')
-        num_classes = config.get('num_classes',
-                                 config.get('num_features', 9083))
-
-        model = timm.create_model(arch, pretrained=False,
-                                  num_classes=num_classes)
-        state_dict = load_file(str(model_path))
-        model.load_state_dict(state_dict)
-
-        self._device = torch.device(
-            'cuda' if torch.cuda.is_available() else 'cpu')
-        model = model.to(self._device)
-        model.eval()
-        self._model = model
+        self._model = InferenceSession(str(model_path),providers=['DmlExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider'])
 
         self._tags = []
         self._rating_indices = []
@@ -116,7 +96,6 @@ class WdTaggerCaptioner:
 
     def caption(self, image_path: Path) -> list[str]:
         self._ensure_model()
-        import torch
         from PIL import Image as PilImage
 
         img = PilImage.open(image_path).convert('RGBA')
@@ -130,19 +109,18 @@ class WdTaggerCaptioner:
         v_pad = (max_dim - img.height) // 2
         canvas.paste(img, (h_pad, v_pad))
 
-        if max_dim != self.INPUT_SIZE:
-            canvas = canvas.resize((self.INPUT_SIZE, self.INPUT_SIZE),
+        _, input_dim, *_ = self._model.get_inputs()[0].shape
+        if max_dim != input_dim:
+            canvas = canvas.resize((input_dim, input_dim),
                                    resample=PilImage.Resampling.BICUBIC)
 
-        # RGB→BGR, normalize with mean=0.5/std=0.5 → [-1, 1], NCHW
-        arr = np.array(canvas, dtype=np.float32)[:, :, ::-1] / 255.0
-        arr = (arr - 0.5) / 0.5
-        tensor = torch.from_numpy(arr.copy()).permute(2, 0, 1).unsqueeze(0)
-        tensor = tensor.to(self._device)
+        arr = np.array(canvas, dtype=np.float32)[:, :, ::-1]
+        arr = np.expand_dims(arr, axis=0)
 
-        with torch.no_grad():
-            logits = self._model(tensor)
-            probs = torch.sigmoid(logits)[0].cpu().numpy()
+        input_name = self._model.get_inputs()[0].name
+        output_name = self._model.get_outputs()[0].name
+        probs = self._model.run([output_name], {input_name: arr})[0][0]
+        probs = probs.astype(np.float32)
 
         results = []
         for i, (tag, prob) in enumerate(zip(self._tags, probs)):
@@ -151,7 +129,7 @@ class WdTaggerCaptioner:
             if tag in self.exclude_tags:
                 continue
             if prob >= self.min_probability:
-                results.append((tag, float(prob)))
+                results.append((tag, prob))
 
         results.sort(key=lambda x: x[1], reverse=True)
         return [tag for tag, _ in results[:self.max_tags]]
