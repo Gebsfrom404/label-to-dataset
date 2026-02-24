@@ -96,10 +96,29 @@ This applies in `ltd/utils/mask_utils.py:mask_from_qimage()`.
 - Pan: ScrollHandDrag mode when Hand tool active
 - `fitInView` on initial load
 
+## Crop & Split Overlays
+
+The canvas supports two additional overlay modes activated programmatically (not via the `Tool` enum):
+
+**Crop overlay** (`set_crop_mode(True/False)`):
+- 4 dim rectangles + 1 border rect + 8 drag handles
+- Handles use `ItemIgnoresTransformations` for fixed screen-space size
+- Used by ModifyTab's `_TOOL_CROP` string constant
+
+**Split overlay** (`set_split_mode(orientation)` where orientation is `'V'` or `'H'`):
+- A `QGraphicsLineItem` divider, either vertical or horizontal
+- Position controlled via `set_split_pos(float)`
+- Emits `split_pos_changed(float)` signal
+- Used by ModifyTab's `_TOOL_SPLIT_V` / `_TOOL_SPLIT_H` string constants
+
+**Important**: ModifyTab manages these alongside canvas `Tool` enum tools using its own exclusive `QButtonGroup`. The crop/split tool IDs (`_TOOL_CROP`, `_TOOL_SPLIT_V`, `_TOOL_SPLIT_H`) are plain strings, NOT members of the `Tool` enum.
+
 ## Signals
 
 - `label_created(Label)` — new bbox/polygon drawn
 - `label_selected(int)` — label clicked with Pointer
 - `label_modified(int, Label)` — label moved/resized via Pointer drag
 - `mask_updated(DrawMode)` — mask buffer changed (emits DrawMode: NEW, COMBINE, or ERASE)
+- `drawing_started()` — emitted before first stroke of a brush draw action
 - `brush_size_changed(int)` — for external spinbox sync
+- `split_pos_changed(float)` — emitted when user drags the split overlay divider

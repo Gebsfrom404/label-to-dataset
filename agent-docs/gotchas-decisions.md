@@ -33,6 +33,10 @@ Temp dir keyed by MD5 hash of source directory path for stability.
 
 Labels stored in temp folder to avoid filename collision with caption `.txt` files. Both use `{imagename}.txt` pattern but different content.
 
+## ComparisonSlider — Currently Unused
+
+The `ComparisonSlider` widget (`ltd/widgets/comparison_slider.py`) exists but is **not imported by any tab**. ModifyTab now uses the CanvasWidget's built-in split overlay instead. The widget is kept as a utility but the following two entries describe its internal behavior, not current app behavior.
+
 ## Comparison Slider — Layout
 
 Horizontal curtain wipe: left = before (original), right = after (modified). The divider line is at `slider_pos`:
@@ -64,6 +68,14 @@ Canvas needs `StrongFocus` policy and `keyPressEvent`/`keyReleaseEvent` handlers
 ## No Separate Eraser Tool
 
 There is no `Tool.ERASER` enum value. Erasing is handled by setting `DrawMode.ERASE` while using the Brush/Marker tool. The eraser mode is controlled by the draw mode selector in the Label tab UI, not by switching tools.
+
+## Canvas Split Overlay — No-op Handler
+
+The canvas emits `split_pos_changed(float)` when the user drags the split divider. ModifyTab connects it to `_on_split_pos_from_canvas` which is currently a no-op (`pass`). The signal and connection exist for future use — don't assume it's broken.
+
+## ModifyTab Crop/Split Tools Are Strings, Not Tool Enum
+
+ModifyTab defines `_TOOL_CROP = 'crop'`, `_TOOL_SPLIT_V = 'split_v'`, `_TOOL_SPLIT_H = 'split_h'` as plain string constants. These are NOT members of the canvas `Tool` enum. ModifyTab manages them alongside actual `Tool` enum values in its own `QButtonGroup`. When adding new tools to ModifyTab, use the same string-constant pattern.
 
 ## ModificationWorker — Module Unload
 

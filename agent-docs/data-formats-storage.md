@@ -34,9 +34,14 @@ class ImageItem:
     tags: list[str]         # Caption tags
     mask_path: Path | None  # Binary mask path
     modified_path: Path | None  # Modified image from Modify tab
+    relative_path: str = '' # Set when loaded from subfolders
+    _thumbnail: object = None  # Cached thumbnail (QPixmap)
 ```
 
 Key properties:
+- `name` → `path.stem` (filename without extension)
+- `filename` → `path.name` (filename with extension)
+- `display_name` → `relative_path` if set, else `filename` (used in image list views for subfolder display)
 - `display_path` → returns `modified_path` if available, else `path` (used for showing current state)
 - `caption_path` → `path.with_suffix('.txt')` (caption file location)
 - `load_tags_from_file(separator=', ')` / `save_tags_to_file(separator=', ')` — read/write tags with configurable separator
@@ -87,10 +92,11 @@ Extras tab uses `extras/{script_stem}/{param_name}` keys for per-script paramete
 
 ## Undo System (Label Tab)
 
-Per-image undo stacks: `_undo_stacks[image_path] = [snapshot, ...]`
+Per-image undo stacks: `_undo_stacks[image_index] = [snapshot, ...]` (keyed by image index, not path)
 - `_push_undo()` called before every label mutation (deep copy of labels + mask)
 - Ctrl+Z pops and restores
-- Stacks are keyed by image path, persist while folder is open
+- Stacks are keyed by image index, persist while folder is open, cleared on directory load
+- Max 50 undo levels per image
 
 ## Undo System (Caption Tab)
 

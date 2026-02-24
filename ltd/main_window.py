@@ -98,9 +98,12 @@ class MainWindow(QMainWindow):
                       (screen.height() - self.height()) // 2)
         if self.settings.contains('window_state'):
             self.restoreState(self.settings.value('window_state', type=bytes))
+        if self.settings.contains('active_tab'):
+            self.tab_widget.setCurrentIndex(self.settings.value('active_tab', type=int))
 
     def closeEvent(self, event: QCloseEvent):
         self.settings.setValue('geometry', self.saveGeometry())
         self.settings.setValue('window_state', self.saveState())
+        self.settings.setValue('active_tab', self.tab_widget.currentIndex())
         cleanup_all_temp()
         super().closeEvent(event)

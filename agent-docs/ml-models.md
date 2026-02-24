@@ -2,9 +2,16 @@
 
 ## YOLO Detection
 
-Uses Ultralytics library. Models stored in `models/yolo/`. Supports YOLO v8/v10/v11 variants (n/s/m/l/x).
+Uses Ultralytics library. Models stored in `models/yolo/`.
+
+Train tab offers YOLO26 presets for both detect and segment tasks:
+- Detect: `YOLO26n/s/m/l/x` (`yolo26n.pt` … `yolo26x.pt`)
+- Segment: `YOLO26n-seg/s-seg/m-seg/l-seg/x-seg`
+- Custom models: any `.pt` file placed in `./models/yolo/` is also listed in the dropdown
 
 Training via `ltd/tabs/train_tab.py` → `ltd/workers/training_worker.py` using `ultralytics.YOLO.train()`.
+
+For detection in Label tab, any user-supplied `.pt` model can be loaded (not restricted to YOLO26).
 
 ## LaMa Inpainting
 

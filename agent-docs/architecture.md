@@ -24,7 +24,8 @@ Each tab is a QWidget in `ltd/tabs/`. MainWindow holds them in a QTabWidget and 
 | Image item | `ltd/data/image_item.py` | ImageItem dataclass (path, thumbnail, labels, tags, mask, modified_path) |
 | Label data | `ltd/data/label_data.py` | LabelClass, Label dataclasses, DEFAULT_COLORS |
 | Canvas | `ltd/widgets/canvas_widget.py` | QGraphicsView: zoom/pan/draw, mask buffer, label overlay, pointer drag editing |
-| Comparison | `ltd/widgets/comparison_slider.py` | Before/after horizontal wipe slider (auto-scales mismatched sizes) |
+| Comparison | `ltd/widgets/comparison_slider.py` | Before/after horizontal wipe slider (auto-scales mismatched sizes). **Currently unused** — ModifyTab uses CanvasWidget split overlay instead |
+| Image list (Modify) | `ltd/widgets/image_list_widget.py` | Simple image list widget used by ModifyTab |
 | Module selector | `ltd/widgets/module_selector.py` | Plugin dropdown + dynamic settings panel, QSettings persistence |
 | Settings widgets | `ltd/widgets/settings_widgets.py` | Auto-persisting QSettings-bound Qt widgets |
 | Toolbar | `ltd/widgets/toolbar_widget.py` | ComfyUI URL, theme toggle, font size |
@@ -51,9 +52,9 @@ Each tab is a QWidget in `ltd/tabs/`. MainWindow holds them in a QTabWidget and 
 
 `ltd/tabs/extras_tab.py` — Standalone utility scripts. Auto-discovers Python scripts from `extras_scripts/` directory.
 
-Scripts must export: `SCRIPT_INFO` dict (name, parameters), `check_available()` function, and either `run()` (in-process threaded) or `build_command()` (spawns terminal).
+Scripts must export: `SCRIPT_INFO` dict (name, parameters), `check_available()` function (returns `(bool, str)` — required), and either `run()` (in-process threaded) or `build_command()` (spawns terminal).
 
-Parameter types: `str`, `bool`, `folder`. Settings persisted via QSettings under `extras/{script_stem}/{param_name}`.
+Parameter types: `str`, `bool`, `folder`, `combo`. Settings persisted via QSettings under `extras/{script_stem}/{param_name}`.
 
 ## Directory Layout
 
