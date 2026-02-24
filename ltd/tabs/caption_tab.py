@@ -1137,6 +1137,8 @@ class CaptionTab(QWidget):
         tokens = proxy._tokenize(text)
         patterns = []
         for token in tokens:
+            if token in ('(', ')'):
+                continue
             if token.lower() in proxy._KEYWORDS:
                 continue
             if token.startswith('-') and len(token) > 1:

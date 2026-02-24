@@ -58,7 +58,12 @@ class ImageFilterProxyModel(QSortFilterProxyModel):
       - or             : separate OR groups (any group matches)
       - not / -        : negate the next term  (-tag:1boy, not tag:1boy)
       - and            : explicit AND (implicit between terms, optional)
+      - ( ... )        : group expressions for precedence
       - "quoted text"  : preserves spaces in values
+
+    Examples:
+      tag:1girl and not (tag:1boy or tag:3boys)
+      (tag:cat or tag:dog) and not tag:blurry
     """
 
     _OPS = {
@@ -72,19 +77,18 @@ class ImageFilterProxyModel(QSortFilterProxyModel):
     def __init__(self, source_model: ImageListModel, parent=None):
         super().__init__(parent)
         self.setSourceModel(source_model)
-        # list of OR-groups; each group is list of (negated, term)
-        self._filter_groups: list[list[tuple]] = []
+        self._filter_ast: tuple | None = None
 
     def set_filter_text(self, text: str):
         raw = text.strip()
-        self._filter_groups = self._parse(raw) if raw else []
+        self._filter_ast = self._parse(raw) if raw else None
         self.invalidateFilter()
 
-    # -- parsing --
+    # -- tokenizer --
 
     @staticmethod
     def _tokenize(text: str) -> list[str]:
-        """Split on spaces but respect quoted strings."""
+        """Split on spaces, respect quoted strings, emit ( ) as tokens."""
         tokens: list[str] = []
         buf = ''
         in_quote = ''
@@ -96,6 +100,11 @@ class ImageFilterProxyModel(QSortFilterProxyModel):
                     buf += ch
             elif ch in ('"', "'"):
                 in_quote = ch
+            elif ch in ('(', ')'):
+                if buf:
+                    tokens.append(buf)
+                    buf = ''
+                tokens.append(ch)
             elif ch == ' ':
                 if buf:
                     tokens.append(buf)
@@ -105,6 +114,8 @@ class ImageFilterProxyModel(QSortFilterProxyModel):
         if buf:
             tokens.append(buf)
         return tokens
+
+    # -- term parser --
 
     def _parse_term(self, token: str) -> tuple:
         if ':' in token:
@@ -122,40 +133,87 @@ class ImageFilterProxyModel(QSortFilterProxyModel):
                     return ('tags_num', m.group(1), int(m.group(2)))
         return ('text', token)
 
-    def _parse(self, text: str) -> list[list[tuple]]:
-        """Parse into OR-groups of AND-terms.
+    # -- recursive descent parser --
+    # Builds an AST: ('term', data) | ('and', [nodes]) |
+    #                ('or', [nodes])  | ('not', node)
 
-        Returns list of groups.  Image matches if ANY group matches.
-        Within a group every (negated, term) must hold.
-        """
-        tokens = self._tokenize(text)
-        groups: list[list[tuple]] = [[]]
-        negate_next = False
+    def _parse(self, text: str) -> tuple | None:
+        self._tokens = self._tokenize(text)
+        self._pos = 0
+        if not self._tokens:
+            return None
+        node = self._parse_or()
+        return node
 
-        for token in tokens:
-            low = token.lower()
-            if low == 'or':
-                if groups[-1]:
-                    groups.append([])
-                negate_next = False
+    def _peek(self) -> str | None:
+        if self._pos < len(self._tokens):
+            return self._tokens[self._pos]
+        return None
+
+    def _consume(self) -> str:
+        tok = self._tokens[self._pos]
+        self._pos += 1
+        return tok
+
+    def _parse_or(self) -> tuple | None:
+        """Parse OR expressions (lowest precedence)."""
+        left = self._parse_and()
+        if left is None:
+            return None
+        children = [left]
+        while self._peek() and self._peek().lower() == 'or':
+            self._consume()
+            right = self._parse_and()
+            if right is not None:
+                children.append(right)
+        return children[0] if len(children) == 1 else ('or', children)
+
+    def _parse_and(self) -> tuple | None:
+        """Parse AND expressions (implicit between adjacent terms)."""
+        children = []
+        while True:
+            tok = self._peek()
+            if tok is None or tok == ')' or (tok and tok.lower() == 'or'):
+                break
+            if tok and tok.lower() == 'and':
+                self._consume()
                 continue
-            if low == 'and':
-                continue
-            if low == 'not':
-                negate_next = True
-                continue
+            child = self._parse_not()
+            if child is not None:
+                children.append(child)
+            else:
+                break
+        if not children:
+            return None
+        return children[0] if len(children) == 1 else ('and', children)
 
-            negated = negate_next
-            negate_next = False
+    def _parse_not(self) -> tuple | None:
+        """Parse NOT prefix (can stack: not not x)."""
+        negated = False
+        while self._peek() and self._peek().lower() == 'not':
+            self._consume()
+            negated = not negated
+        node = self._parse_atom()
+        if node is None:
+            return None
+        return ('not', node) if negated else node
 
-            # - prefix negation
-            if token.startswith('-') and len(token) > 1:
-                negated = True
-                token = token[1:]
-
-            groups[-1].append((negated, self._parse_term(token)))
-
-        return [g for g in groups if g]
+    def _parse_atom(self) -> tuple | None:
+        """Parse a single term or parenthesized expression."""
+        tok = self._peek()
+        if tok is None:
+            return None
+        if tok == '(':
+            self._consume()
+            node = self._parse_or()
+            if self._peek() == ')':
+                self._consume()
+            return node
+        self._consume()
+        # - prefix negation on terms
+        if tok.startswith('-') and len(tok) > 1:
+            return ('not', ('term', self._parse_term(tok[1:])))
+        return ('term', self._parse_term(tok))
 
     # -- matching --
 
@@ -189,33 +247,29 @@ class ImageFilterProxyModel(QSortFilterProxyModel):
             return op_fn(len(image.tags), num) if op_fn else True
         return True
 
-    def _group_matches(self, image: ImageItem, group: list) -> bool:
-        """All terms in the group must hold (AND)."""
-        for negated, term in group:
-            result = self._term_matches(image, term)
-            if negated and result:
-                return False
-            if not negated and not result:
-                return False
+    def _eval_node(self, image: ImageItem, node: tuple) -> bool:
+        """Evaluate an AST node against an image."""
+        kind = node[0]
+        if kind == 'term':
+            return self._term_matches(image, node[1])
+        elif kind == 'and':
+            return all(self._eval_node(image, c) for c in node[1])
+        elif kind == 'or':
+            return any(self._eval_node(image, c) for c in node[1])
+        elif kind == 'not':
+            return not self._eval_node(image, node[1])
         return True
-
-    def _image_matches(self, image: ImageItem) -> bool:
-        """Any group matching is enough (OR across groups)."""
-        for group in self._filter_groups:
-            if self._group_matches(image, group):
-                return True
-        return False
 
     def filterAcceptsRow(self, source_row: int,
                          source_parent: QModelIndex) -> bool:
-        if not self._filter_groups:
+        if self._filter_ast is None:
             return True
         source = self.sourceModel()
         image = source.data(source.index(source_row, 0),
                             Qt.ItemDataRole.UserRole)
         if image is None:
             return False
-        return self._image_matches(image)
+        return self._eval_node(image, self._filter_ast)
 
 
 # ---------------------------------------------------------------------------
@@ -249,7 +303,7 @@ class CaptionImageList(QWidget):
         # Filter bar
         self.filter_input = QLineEdit()
         self.filter_input.setPlaceholderText(
-            'Filter: tag:x, name:*, tags:>N, or, not/-')
+            'Filter: tag:x, name:*, tags:>N, or, not/-, (groups)')
         self.filter_input.setClearButtonEnabled(True)
         layout.addWidget(self.filter_input)
 
