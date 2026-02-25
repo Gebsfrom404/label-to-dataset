@@ -5,8 +5,8 @@ import shutil
 from collections import OrderedDict
 from pathlib import Path
 
-from PySide6.QtCore import QModelIndex, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QPixmap, QShortcut, QKeySequence
+from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QShortcut, QKeySequence
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox,
                                QFileDialog, QGroupBox, QHBoxLayout, QLabel,
                                QListWidget, QListWidgetItem, QMessageBox,

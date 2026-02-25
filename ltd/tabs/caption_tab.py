@@ -24,7 +24,7 @@ from ltd.comfyui.workflow import (load_workflow, validate_caption_workflow,
 from ltd.data.image_item import ImageItem
 from ltd.data.tag_dictionary import TagDictionary
 from ltd.settings import get_settings
-from ltd.data.image_list_model import IMAGE_EXTENSIONS, ImageListModel
+from ltd.data.image_list_model import ImageListModel
 from ltd.dialogs.batch_reorder_dialog import BatchReorderDialog
 from ltd.dialogs.find_replace_dialog import FindReplaceDialog
 from ltd.utils.file_utils import get_temp_dir

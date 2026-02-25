@@ -1,0 +1,31 @@
+[project]
+name = "label-to-dataset"
+version = "1.0.0"
+description = "PySide6 desktop app: Label → Modify → Caption → Train YOLO pipeline"
+requires-python = ">=3.13"
+dependencies = [
+    "PySide6>=6.10.0",
+    "Pillow>=12.1.0",
+    "imagesize>=1.4.1",
+    "numpy>=2.4.0",
+    "opencv-python-headless>=4.13.0",
+    "ultralytics>=8.4.0",
+    "huggingface-hub>=1.4.0",
+    "onnxruntime-directml>=1.24.0",
+    "pyparsing>=3.3.0",
+    "requests>=2.32.0",
+    "websocket-client>=1.9.0",
+    "pyyaml>=6.0.3",
+    "torch>=2.9.1",
+]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[project.scripts]
+ltd = "main:main"

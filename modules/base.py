@@ -1,7 +1,6 @@
 """Abstract base classes for detection and modification modules."""
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Optional
 
 from PySide6.QtWidgets import QWidget
 

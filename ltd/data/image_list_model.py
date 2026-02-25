@@ -5,7 +5,6 @@ from PySide6.QtCore import (QAbstractListModel, QModelIndex, QSize, Qt,
 from PySide6.QtGui import QImage, QImageReader, QPixmap
 
 from ltd.data.image_item import ImageItem
-from ltd.settings import DEFAULT_SETTINGS, get_settings
 
 IMAGE_EXTENSIONS = {'.bmp', '.gif', '.jpg', '.jpeg', '.png', '.tif', '.tiff',
                     '.webp'}

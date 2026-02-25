@@ -4,7 +4,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QComboBox, QFileDialog, QGroupBox, QHBoxLayout,
                                QLabel, QLineEdit, QMessageBox, QProgressBar,
-                               QPushButton, QSlider, QSpinBox, QVBoxLayout,
+                               QPushButton, QSlider, QVBoxLayout,
                                QWidget, QTextEdit)
 
 from ltd.workers.training_worker import TrainingWorker

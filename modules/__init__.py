@@ -45,7 +45,7 @@ def discover_modules(base_class, package_path: str) -> list:
                 if (issubclass(obj, base_class) and obj is not base_class
                         and not inspect.isabstract(obj)):
                     modules.append(obj())
-        except Exception as e:
+        except Exception:
             import traceback
             traceback.print_exc()
             continue

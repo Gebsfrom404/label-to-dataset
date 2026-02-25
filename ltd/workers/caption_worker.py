@@ -1,5 +1,4 @@
 """Worker thread for batch captioning."""
-from pathlib import Path
 
 from PySide6.QtCore import Signal
 

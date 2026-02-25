@@ -2,14 +2,12 @@
 import copy
 from pathlib import Path
 
-import numpy as np
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 from modules.base import BaseDetectionModule
 from ltd.comfyui.client import ComfyUIClient
 from ltd.comfyui.workflow import (load_workflow, validate_detection_workflow,
-                                   set_input_image, find_nodes_by_title,
-                                   LTD_OUTPUT_MASK, LTD_OUTPUT_IMAGE)
+                                   set_input_image)
 from ltd.utils.file_utils import get_temp_dir_no_clear
 from ltd.widgets.workflow_selector import WorkflowSelector
 

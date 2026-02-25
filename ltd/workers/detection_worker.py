@@ -1,5 +1,4 @@
 """Worker thread for batch detection."""
-from pathlib import Path
 
 from PySide6.QtCore import Signal
 

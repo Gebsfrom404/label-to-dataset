@@ -8,7 +8,7 @@ from pathlib import Path
 from PySide6.QtCore import (QFile, QModelIndex, QSize, QSortFilterProxyModel,
                              Qt, QUrl, Signal)
 from PySide6.QtGui import QDesktopServices, QKeySequence, QShortcut
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog,
+from PySide6.QtWidgets import (QApplication, QFileDialog,
                                QLabel, QLineEdit, QListView, QMenu,
                                QMessageBox, QPushButton, QVBoxLayout,
                                QWidget)

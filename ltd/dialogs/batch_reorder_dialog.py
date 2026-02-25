@@ -1,7 +1,6 @@
 """Batch reorder tags dialog (adapted from taggui)."""
 import random
 
-from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFrame,
                                QHBoxLayout, QLabel, QLineEdit, QPushButton,
                                QVBoxLayout)
