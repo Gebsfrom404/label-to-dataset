@@ -615,7 +615,12 @@ class LabelTab(QWidget):
 
     def _on_label_selected(self, index: int):
         if 0 <= index < self.labels_list.count():
-            self.labels_list.setCurrentRow(index)
+            if self.labels_list.currentRow() == index:
+                # Same row — setCurrentRow won't fire currentRowChanged,
+                # so apply highlight directly.
+                self.canvas.highlight_label(index)
+            else:
+                self.labels_list.setCurrentRow(index)
         else:
             self.canvas.highlight_label(-1)
 

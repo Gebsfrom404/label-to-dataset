@@ -736,6 +736,7 @@ class CanvasWidget(QGraphicsView):
                 return
         self._selected_label_index = -1
         self.label_selected.emit(-1)
+        self.label_selected.emit(-1)
 
     def _handle_pointer_drag(self, pos: QPointF):
         """Update label shape and handles while dragging."""
