@@ -7,8 +7,8 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QBrush, QColor, QKeySequence, QPainter, QShortcut
+from PySide6.QtCore import Qt, QThread, QTimer, Signal
+from PySide6.QtGui import QBrush, QColor, QKeySequence, QPainter, QPixmap, QShortcut
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox,
                                QDialog, QDoubleSpinBox,
                                QGraphicsScene, QGraphicsView,
@@ -28,7 +28,7 @@ from ltd.data.image_list_model import ImageListModel
 from ltd.dialogs.batch_reorder_dialog import BatchReorderDialog
 from ltd.dialogs.find_replace_dialog import FindReplaceDialog
 from ltd.utils.file_utils import get_temp_dir
-from ltd.utils.image_utils import load_pixmap_preview
+from ltd.utils.image_utils import load_pixmap, load_pixmap_preview
 from ltd.widgets.caption_image_list import CaptionImageList
 from ltd.widgets.loading_dialog import loading_dialog
 from ltd.widgets.tag_completer_popup import TagCompleterPopup
@@ -406,8 +406,22 @@ class TagInputField(QLineEdit):
 # Image Viewer (auto-fit, Ctrl+scroll zoom, spacebar+drag pan)
 # ---------------------------------------------------------------------------
 
+class _FullResLoader(QThread):
+    """Background thread that loads a full-resolution pixmap."""
+    ready = Signal(str, QPixmap)  # (path_key, pixmap)
+
+    def __init__(self, path: Path, parent=None):
+        super().__init__(parent)
+        self._path = path
+
+    def run(self):
+        pixmap = load_pixmap(self._path)
+        if pixmap:
+            self.ready.emit(str(self._path), pixmap)
+
+
 class CaptionImageViewer(QGraphicsView):
-    """Image viewer with auto-fit, Ctrl+scroll zoom, Space+drag pan."""
+    """Image viewer with auto-fit, Ctrl+scroll zoom, drag pan when zoomed."""
     navigate_image = Signal(int)  # -1 = prev, +1 = next
 
     def __init__(self, parent=None):
@@ -418,12 +432,15 @@ class CaptionImageViewer(QGraphicsView):
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._pixmap_item = None
         self._manually_zoomed = False
+        self._update_drag_mode()
 
     def load_image(self, pixmap):
         self._scene.clear()
         self._pixmap_item = None
         if pixmap:
             self._pixmap_item = self._scene.addPixmap(pixmap)
+            self._pixmap_item.setTransformationMode(
+                Qt.TransformationMode.SmoothTransformation)
             # Reset scene rect to this pixmap's bounds so fitInView
             # doesn't use a stale rect from a previously larger image.
             self._scene.setSceneRect(self._pixmap_item.boundingRect())
@@ -432,11 +449,27 @@ class CaptionImageViewer(QGraphicsView):
         else:
             self._scene.setSceneRect(0, 0, 0, 0)
 
+    def replace_pixmap(self, pixmap):
+        """Swap pixmap data without resetting zoom/pan state."""
+        if self._pixmap_item is None:
+            return
+        self._pixmap_item.setPixmap(pixmap)
+        self._scene.setSceneRect(self._pixmap_item.boundingRect())
+        if not self._manually_zoomed:
+            self._fit_image()
+
     def _fit_image(self):
         if self._pixmap_item:
             self.fitInView(self._scene.sceneRect(),
                            Qt.AspectRatioMode.KeepAspectRatio)
             self._manually_zoomed = False
+            self._update_drag_mode()
+
+    def _update_drag_mode(self):
+        if self._manually_zoomed:
+            self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        else:
+            self.setDragMode(QGraphicsView.DragMode.NoDrag)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -449,15 +482,12 @@ class CaptionImageViewer(QGraphicsView):
             factor = 1.2 if event.angleDelta().y() > 0 else 1 / 1.2
             self.scale(factor, factor)
             self._manually_zoomed = True
+            self._update_drag_mode()
             event.accept()
         else:
             super().wheelEvent(event)
 
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key.Key_Space and not event.isAutoRepeat():
-            self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
-            event.accept()
-            return
         # Ctrl+0 to reset zoom to fit
         if (event.key() == Qt.Key.Key_0
                 and event.modifiers() & Qt.KeyboardModifier.ControlModifier):
@@ -474,13 +504,6 @@ class CaptionImageViewer(QGraphicsView):
             return
         super().keyPressEvent(event)
 
-    def keyReleaseEvent(self, event):
-        if event.key() == Qt.Key.Key_Space and not event.isAutoRepeat():
-            self.setDragMode(QGraphicsView.DragMode.NoDrag)
-            event.accept()
-            return
-        super().keyReleaseEvent(event)
-
 
 # ---------------------------------------------------------------------------
 # Caption Tab
@@ -495,7 +518,8 @@ class CaptionTab(QWidget):
         self._current_image_index = -1
         self._all_tags: dict[str, int] = {}  # tag -> count
         self._worker: CaptionWorker | None = None
-        self._pixmap_cache: OrderedDict[str, object] = OrderedDict()
+        self._pixmap_cache: OrderedDict[str, QPixmap | None] = OrderedDict()
+        self._fullres_loader: _FullResLoader | None = None
 
         # Undo/redo stacks (per image index)
         self._undo_stacks: dict[int, list[list[str]]] = {}
@@ -1022,6 +1046,7 @@ class CaptionTab(QWidget):
     # ------------------------------------------------------------------
 
     def load_from_modify_tab(self, items: list[ImageItem]):
+        self._cancel_fullres_loader()
         self._pixmap_cache.clear()
         self._clear_undo_stacks()
         self.model.load_items(items)
@@ -1037,6 +1062,7 @@ class CaptionTab(QWidget):
         sep = self._get_separator()
 
         with loading_dialog('Loading images...', self) as dlg:
+            self._cancel_fullres_loader()
             self._pixmap_cache.clear()
             self._clear_undo_stacks()
             self.model.load_directory(directory)
@@ -1074,6 +1100,22 @@ class CaptionTab(QWidget):
     # Image selection
     # ------------------------------------------------------------------
 
+    def _cancel_fullres_loader(self):
+        if self._fullres_loader is not None:
+            self._fullres_loader.ready.disconnect()
+            self._fullres_loader.quit()
+            self._fullres_loader.wait(500)
+            self._fullres_loader = None
+
+    def _on_fullres_ready(self, key: str, pixmap: QPixmap):
+        """Swap in the full-res pixmap if the image is still current."""
+        image = self.model.get_image(self._current_image_index)
+        if image is None or str(image.path) != key:
+            return
+        self._pixmap_cache[key] = pixmap
+        self.image_viewer.replace_pixmap(pixmap)
+        self._fullres_loader = None
+
     def _on_image_changed(self, index: int):
         self._save_current_tags()
         self._current_image_index = index
@@ -1084,8 +1126,24 @@ class CaptionTab(QWidget):
         # Snapshot for undo tracking
         self._pre_tags_snapshot = list(image.tags)
 
-        pixmap = self._load_cached(image.path)
-        self.image_viewer.load_image(pixmap)
+        # Cancel any in-flight full-res load
+        self._cancel_fullres_loader()
+
+        key = str(image.path)
+        cached = self._pixmap_cache.get(key)
+        if cached:
+            # Cache hit — show immediately
+            self._pixmap_cache.move_to_end(key)
+            self.image_viewer.load_image(cached)
+        else:
+            # Show preview instantly, then swap full-res from background
+            pixmap = load_pixmap_preview(image.path, self._preview_max_dim())
+            self.image_viewer.load_image(pixmap)
+
+            loader = _FullResLoader(image.path, self)
+            loader.ready.connect(self._on_fullres_ready)
+            loader.start()
+            self._fullres_loader = loader
 
         # Show tags
         self._skip_snapshot = True
@@ -1094,7 +1152,7 @@ class CaptionTab(QWidget):
         self._update_token_count()
         self._update_tag_highlights()
 
-        # Preload adjacent images after current frame finishes
+        # Preload adjacent full-res images after current frame finishes
         QTimer.singleShot(0, lambda idx=index: self._preload_adjacent(idx))
 
     def _on_images_deleted(self):
@@ -1113,24 +1171,22 @@ class CaptionTab(QWidget):
         vp = self.image_viewer.viewport().size()
         return max(vp.width(), vp.height(), 800) * 2
 
-    def _load_cached(self, path) -> object:
-        key = str(path)
-        if key in self._pixmap_cache:
-            self._pixmap_cache.move_to_end(key)
-            return self._pixmap_cache[key]
-        pixmap = load_pixmap_preview(path, self._preview_max_dim())
-        self._pixmap_cache[key] = pixmap
-        while len(self._pixmap_cache) > self._PIXMAP_CACHE_MAX:
-            self._pixmap_cache.popitem(last=False)
-        return pixmap
-
     def _preload_adjacent(self, index: int):
         if index != self._current_image_index:
             return  # user already moved on
         for offset in (-1, 1):
             image = self.model.get_image(index + offset)
             if image and str(image.path) not in self._pixmap_cache:
-                self._load_cached(image.path)
+                loader = _FullResLoader(image.path, self)
+                loader.ready.connect(self._on_preload_ready)
+                loader.start()
+
+    def _on_preload_ready(self, key: str, pixmap: QPixmap):
+        """Cache a preloaded full-res pixmap (no UI swap)."""
+        if key not in self._pixmap_cache:
+            self._pixmap_cache[key] = pixmap
+            while len(self._pixmap_cache) > self._PIXMAP_CACHE_MAX:
+                self._pixmap_cache.popitem(last=False)
 
     def _update_tag_highlights(self):
         """Highlight tags in the Image Tags list that match the current filter."""

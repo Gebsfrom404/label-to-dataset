@@ -198,6 +198,8 @@ class CanvasWidget(QGraphicsView):
         self.scene_.clear()
 
         self._pixmap_item = self.scene_.addPixmap(pixmap)
+        self._pixmap_item.setTransformationMode(
+            Qt.TransformationMode.SmoothTransformation)
         self._image_width = pixmap.width()
         self._image_height = pixmap.height()
 
