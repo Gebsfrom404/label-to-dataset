@@ -12,9 +12,9 @@ from PySide6.QtGui import QBrush, QColor, QKeySequence, QPainter, QShortcut
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox,
                                QDialog, QDoubleSpinBox,
                                QGraphicsScene, QGraphicsView,
-                               QHBoxLayout, QLabel, QLineEdit, QListWidget,
-                               QListWidgetItem, QFileDialog, QMenu,
-                               QMessageBox, QProgressBar, QPushButton,
+                               QGroupBox, QHBoxLayout, QLabel, QLineEdit,
+                               QListWidget, QListWidgetItem, QFileDialog,
+                               QMenu, QMessageBox, QProgressBar, QPushButton,
                                QSpinBox, QSplitter, QTabWidget, QVBoxLayout,
                                QWidget)
 
@@ -698,12 +698,15 @@ class CaptionTab(QWidget):
         tools_row2.addWidget(self.remove_dupes_all_btn)
         tools_layout.addLayout(tools_row2)
 
-        tools_row3 = QHBoxLayout()
-        self.snapshot_save_btn = QPushButton('Create Captions Snapshot...')
-        self.snapshot_restore_btn = QPushButton('Restore Captions from Snapshot...')
-        tools_row3.addWidget(self.snapshot_save_btn)
-        tools_row3.addWidget(self.snapshot_restore_btn)
-        tools_layout.addLayout(tools_row3)
+        snapshot_group = QGroupBox('Caption Snapshots')
+        snapshot_layout = QHBoxLayout(snapshot_group)
+        self.snapshot_save_btn = QPushButton('Create')
+        self.snapshot_restore_btn = QPushButton('Restore All')
+        self.snapshot_restore_some_btn = QPushButton('Restore Some')
+        snapshot_layout.addWidget(self.snapshot_save_btn)
+        snapshot_layout.addWidget(self.snapshot_restore_btn)
+        snapshot_layout.addWidget(self.snapshot_restore_some_btn)
+        tools_layout.addWidget(snapshot_group)
 
         tools_layout.addStretch()
         self.right_tabs.addTab(tools_tab, 'Tools')
@@ -808,6 +811,8 @@ class CaptionTab(QWidget):
         self.remove_empty_btn.clicked.connect(self._remove_empty_all)
         self.snapshot_save_btn.clicked.connect(self._save_captions_snapshot)
         self.snapshot_restore_btn.clicked.connect(self._restore_captions_snapshot)
+        self.snapshot_restore_some_btn.clicked.connect(
+            self._restore_some_from_snapshot)
         self.remove_dupes_all_btn.clicked.connect(
             self._remove_duplicates_all)
 
@@ -1883,6 +1888,77 @@ class CaptionTab(QWidget):
         if unmatched > 0:
             msg += f' ({unmatched} in snapshot not found in current folder)'
         self.caption_status.setText(msg)
+
+    def _restore_some_from_snapshot(self):
+        """Restore only specific tags from a CSV snapshot (merge, no overwrite)."""
+        if not self.model.images:
+            self.caption_status.setText('No images loaded')
+            return
+        default_dir = str(self.model.images[0].path.parent) \
+            if self.model.images else ''
+        path, _ = QFileDialog.getOpenFileName(
+            self, 'Restore Tags from Snapshot', default_dir,
+            'CSV Files (*.csv)')
+        if not path:
+            return
+        from PySide6.QtWidgets import QInputDialog
+        user_input, ok = QInputDialog.getText(
+            self, 'Tags to Restore',
+            'Enter comma-separated tag names to restore from snapshot:')
+        if not ok or not user_input.strip():
+            return
+        requested_tags = {t.strip() for t in user_input.split(',')
+                         if t.strip()}
+        if not requested_tags:
+            return
+
+        sep = self._get_separator()
+        # Parse snapshot
+        snapshot: dict[str, list[str]] = {}
+        with open(path, 'r', encoding='utf-8') as f:
+            reader = csv.reader(f)
+            header = next(reader, None)
+            if not header or len(header) < 2:
+                QMessageBox.warning(self, 'Error',
+                                    'Invalid snapshot file (expected CSV '
+                                    'with image_name, captions columns).')
+                return
+            for row in reader:
+                if len(row) >= 2:
+                    name = row[0].strip()
+                    captions_str = row[1].strip()
+                    tags = [t.strip() for t in captions_str.split(
+                        sep.strip() or sep) if t.strip()] \
+                        if captions_str else []
+                    snapshot[name] = tags
+
+        # Apply — only add requested tags that are missing
+        matched = 0
+        for i, image in enumerate(self.model.images):
+            if image.filename in snapshot:
+                snapshot_tags = snapshot[image.filename]
+                tags_to_add = [t for t in snapshot_tags
+                               if t in requested_tags
+                               and t not in image.tags]
+                if tags_to_add:
+                    self._push_undo(i, list(image.tags))
+                    image.tags.extend(tags_to_add)
+                    self._auto_save_image(image)
+                    matched += 1
+
+        # Refresh display
+        if self._current_image_index >= 0:
+            image = self.model.get_image(self._current_image_index)
+            if image:
+                self._pre_tags_snapshot = list(image.tags)
+                self._skip_snapshot = True
+                self.tags_list.set_tags(image.tags)
+                self._skip_snapshot = False
+        self._rebuild_all_tags()
+        self._update_token_count()
+
+        self.caption_status.setText(
+            f'Restored requested tags for {matched} image(s)')
 
     # ------------------------------------------------------------------
     # Save
