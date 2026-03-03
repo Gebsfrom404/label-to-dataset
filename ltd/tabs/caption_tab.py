@@ -522,11 +522,13 @@ class CaptionTab(QWidget):
         self._fullres_loader: _FullResLoader | None = None
 
         # Undo/redo stacks (per image index)
-        self._undo_stacks: dict[int, list[list[str]]] = {}
-        self._redo_stacks: dict[int, list[list[str]]] = {}
+        # Each entry is (tag_snapshot, batch_id_or_None)
+        self._undo_stacks: dict[int, list[tuple[list[str], int | None]]] = {}
+        self._redo_stacks: dict[int, list[tuple[list[str], int | None]]] = {}
         self._pre_tags_snapshot: list[str] | None = None
         self._max_undo = 50
         self._skip_snapshot = False
+        self._next_batch_id = 0
 
         # Tag dictionary for autocomplete + colors
         self._tag_dict = TagDictionary()
@@ -971,8 +973,15 @@ class CaptionTab(QWidget):
     # Undo / Redo
     # ------------------------------------------------------------------
 
+    def _new_batch_id(self) -> int:
+        """Return a unique batch ID for grouping multi-image undo entries."""
+        bid = self._next_batch_id
+        self._next_batch_id += 1
+        return bid
+
     def _push_undo(self, image_index: int | None = None,
-                   snapshot: list[str] | None = None):
+                   snapshot: list[str] | None = None,
+                   batch_id: int | None = None):
         """Push a snapshot to the undo stack for the given image."""
         idx = image_index if image_index is not None \
             else self._current_image_index
@@ -984,7 +993,7 @@ class CaptionTab(QWidget):
                 return
             snapshot = list(image.tags)
         stack = self._undo_stacks.setdefault(idx, [])
-        stack.append(snapshot)
+        stack.append((snapshot, batch_id))
         if len(stack) > self._max_undo:
             stack.pop(0)
         # Clear redo on new action
@@ -1000,18 +1009,44 @@ class CaptionTab(QWidget):
         image = self.model.get_image(idx)
         if image is None:
             return
-        # Push current state to redo
-        redo = self._redo_stacks.setdefault(idx, [])
-        redo.append(list(image.tags))
-        # Restore from undo
-        image.tags = stack.pop()
-        self._pre_tags_snapshot = list(image.tags)
-        self._skip_snapshot = True
-        self.tags_list.set_tags(image.tags)
-        self._skip_snapshot = False
+
+        snapshot, batch_id = stack[-1]
+
+        if batch_id is not None:
+            # Undo all images in this batch
+            self._undo_batch(batch_id)
+        else:
+            # Single-image undo
+            stack.pop()
+            redo = self._redo_stacks.setdefault(idx, [])
+            redo.append((list(image.tags), None))
+            image.tags = snapshot
+            self._auto_save_image(image)
+
+        # Refresh current image display
+        image = self.model.get_image(idx)
+        if image:
+            self._pre_tags_snapshot = list(image.tags)
+            self._skip_snapshot = True
+            self.tags_list.set_tags(image.tags)
+            self._skip_snapshot = False
         self._rebuild_all_tags()
         self._update_token_count()
-        self._auto_save_image(image)
+
+    def _undo_batch(self, batch_id: int):
+        """Undo all entries with the given batch_id across all images."""
+        for img_idx in list(self._undo_stacks.keys()):
+            stack = self._undo_stacks[img_idx]
+            if not stack or stack[-1][1] != batch_id:
+                continue
+            snapshot, _ = stack.pop()
+            image = self.model.get_image(img_idx)
+            if image is None:
+                continue
+            redo = self._redo_stacks.setdefault(img_idx, [])
+            redo.append((list(image.tags), batch_id))
+            image.tags = snapshot
+            self._auto_save_image(image)
 
     def _redo(self):
         idx = self._current_image_index
@@ -1023,23 +1058,50 @@ class CaptionTab(QWidget):
         image = self.model.get_image(idx)
         if image is None:
             return
-        # Push current state to undo
-        undo = self._undo_stacks.setdefault(idx, [])
-        undo.append(list(image.tags))
-        # Restore from redo
-        image.tags = stack.pop()
-        self._pre_tags_snapshot = list(image.tags)
-        self._skip_snapshot = True
-        self.tags_list.set_tags(image.tags)
-        self._skip_snapshot = False
+
+        snapshot, batch_id = stack[-1]
+
+        if batch_id is not None:
+            # Redo all images in this batch
+            self._redo_batch(batch_id)
+        else:
+            # Single-image redo
+            stack.pop()
+            undo = self._undo_stacks.setdefault(idx, [])
+            undo.append((list(image.tags), None))
+            image.tags = snapshot
+            self._auto_save_image(image)
+
+        # Refresh current image display
+        image = self.model.get_image(idx)
+        if image:
+            self._pre_tags_snapshot = list(image.tags)
+            self._skip_snapshot = True
+            self.tags_list.set_tags(image.tags)
+            self._skip_snapshot = False
         self._rebuild_all_tags()
         self._update_token_count()
-        self._auto_save_image(image)
+
+    def _redo_batch(self, batch_id: int):
+        """Redo all entries with the given batch_id across all images."""
+        for img_idx in list(self._redo_stacks.keys()):
+            stack = self._redo_stacks[img_idx]
+            if not stack or stack[-1][1] != batch_id:
+                continue
+            snapshot, _ = stack.pop()
+            image = self.model.get_image(img_idx)
+            if image is None:
+                continue
+            undo = self._undo_stacks.setdefault(img_idx, [])
+            undo.append((list(image.tags), batch_id))
+            image.tags = snapshot
+            self._auto_save_image(image)
 
     def _clear_undo_stacks(self):
         self._undo_stacks.clear()
         self._redo_stacks.clear()
         self._pre_tags_snapshot = None
+        self._next_batch_id = 0
 
     # ------------------------------------------------------------------
     # Loading
@@ -1222,11 +1284,12 @@ class CaptionTab(QWidget):
 
     def _on_tags_pasted(self, tags: list[str], source_rows: list[int]):
         """Handle paste/clear from context menu on selected images."""
+        bid = self._new_batch_id() if len(source_rows) > 1 else None
         for row in source_rows:
             image = self.model.get_image(row)
             if image is None:
                 continue
-            self._push_undo(row, list(image.tags))
+            self._push_undo(row, list(image.tags), bid)
             if tags:
                 image.tags = image.tags + tags
             self._auto_save_image(image)
@@ -1332,11 +1395,12 @@ class CaptionTab(QWidget):
             if reply != QMessageBox.StandardButton.Yes:
                 return
             self._save_current_tags()
+            bid = self._new_batch_id()
             for row in selected_rows:
                 image = self.model.get_image(row)
                 if image is None:
                     continue
-                self._push_undo(row, list(image.tags))
+                self._push_undo(row, list(image.tags), bid)
                 for tag in new_tags:
                     if tag not in image.tags:
                         image.tags.append(tag)
@@ -1389,12 +1453,13 @@ class CaptionTab(QWidget):
         if clicked == yes_btn:
             tag_set = set(tags)
             count = 0
+            bid = self._new_batch_id()
             for row in selected_rows:
                 image = self.model.get_image(row)
                 if image is None:
                     continue
                 if tag_set & set(image.tags):
-                    self._push_undo(row, list(image.tags))
+                    self._push_undo(row, list(image.tags), bid)
                     image.tags = [t for t in image.tags if t not in tag_set]
                     self._auto_save_image(image)
                     count += 1
@@ -1548,9 +1613,10 @@ class CaptionTab(QWidget):
         if ok and new_name.strip() and new_name.strip() != tag:
             new_name = new_name.strip()
             count = 0
+            bid = self._new_batch_id()
             for i, image in enumerate(self.model.images):
                 if tag in image.tags:
-                    self._push_undo(i, list(image.tags))
+                    self._push_undo(i, list(image.tags), bid)
                     image.tags = [new_name if t == tag else t
                                   for t in image.tags]
                     self._auto_save_image(image)
@@ -1580,10 +1646,11 @@ class CaptionTab(QWidget):
             return
 
         count = 0
+        bid = self._new_batch_id()
         for i, image in enumerate(self.model.images):
             before = len(image.tags)
             if tag_set & set(image.tags):
-                self._push_undo(i, list(image.tags))
+                self._push_undo(i, list(image.tags), bid)
                 image.tags = [t for t in image.tags if t not in tag_set]
                 self._auto_save_image(image)
             count += before - len(image.tags)
@@ -1733,6 +1800,7 @@ class CaptionTab(QWidget):
                     dlg.result_label.setText('No images selected')
                     return
             count = 0
+            bid = self._new_batch_id()
 
             for image in images:
                 old_tags = list(image.tags)
@@ -1756,7 +1824,7 @@ class CaptionTab(QWidget):
                 image.tags = [t for t in new_tags if t.strip()]
                 if image.tags != old_tags:
                     idx = self.model.images.index(image)
-                    self._push_undo(idx, old_tags)
+                    self._push_undo(idx, old_tags, bid)
                     self._auto_save_image(image)
 
             # Refresh
@@ -1783,11 +1851,12 @@ class CaptionTab(QWidget):
         dlg = BatchReorderDialog(dict(self._all_tags), self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             count = 0
+            bid = self._new_batch_id()
             for i, image in enumerate(self.model.images):
                 if image.tags:
                     new_tags = dlg.reorder_tags(image.tags)
                     if new_tags != image.tags:
-                        self._push_undo(i, list(image.tags))
+                        self._push_undo(i, list(image.tags), bid)
                         image.tags = new_tags
                         self._auto_save_image(image)
                         count += 1
@@ -1809,10 +1878,11 @@ class CaptionTab(QWidget):
 
     def _remove_empty_all(self):
         count = 0
+        bid = self._new_batch_id()
         for i, image in enumerate(self.model.images):
             before = len(image.tags)
             if any(not t.strip() for t in image.tags):
-                self._push_undo(i, list(image.tags))
+                self._push_undo(i, list(image.tags), bid)
                 image.tags = [t for t in image.tags if t.strip()]
                 self._auto_save_image(image)
             count += before - len(image.tags)
@@ -1829,6 +1899,7 @@ class CaptionTab(QWidget):
 
     def _remove_duplicates_all(self):
         count = 0
+        bid = self._new_batch_id()
         for i, image in enumerate(self.model.images):
             seen = set()
             unique = []
@@ -1839,7 +1910,7 @@ class CaptionTab(QWidget):
                     unique.append(tag)
             removed = len(image.tags) - len(unique)
             if removed:
-                self._push_undo(i, list(image.tags))
+                self._push_undo(i, list(image.tags), bid)
                 image.tags = unique
                 self._auto_save_image(image)
             count += removed
@@ -1919,11 +1990,12 @@ class CaptionTab(QWidget):
 
         # Apply
         matched = 0
+        bid = self._new_batch_id()
         for i, image in enumerate(self.model.images):
             if image.filename in snapshot:
                 new_tags = snapshot[image.filename]
                 if new_tags != image.tags:
-                    self._push_undo(i, list(image.tags))
+                    self._push_undo(i, list(image.tags), bid)
                     image.tags = new_tags
                     self._auto_save_image(image)
                 matched += 1
@@ -1990,6 +2062,7 @@ class CaptionTab(QWidget):
 
         # Apply — only add requested tags that are missing
         matched = 0
+        bid = self._new_batch_id()
         for i, image in enumerate(self.model.images):
             if image.filename in snapshot:
                 snapshot_tags = snapshot[image.filename]
@@ -1997,7 +2070,7 @@ class CaptionTab(QWidget):
                                if t in requested_tags
                                and t not in image.tags]
                 if tags_to_add:
-                    self._push_undo(i, list(image.tags))
+                    self._push_undo(i, list(image.tags), bid)
                     image.tags.extend(tags_to_add)
                     self._auto_save_image(image)
                     matched += 1
