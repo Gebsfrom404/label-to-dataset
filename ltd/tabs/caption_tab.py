@@ -1635,6 +1635,12 @@ class CaptionTab(QWidget):
     def _delete_tags_from_all_images(self, tags: list[str]):
         """Delete tags from all images (triggered by Delete key in all-tags)."""
         tag_set = set(tags)
+
+        # Remember selection row before dialog steals focus
+        selected_rows = [idx.row() for idx in
+                         self.all_tags_list.selectedIndexes()]
+        restore_row = min(selected_rows) if selected_rows else -1
+
         names = ', '.join(f'"{t}"' for t in tags[:5])
         if len(tags) > 5:
             names += f' and {len(tags) - 5} more'
@@ -1647,15 +1653,31 @@ class CaptionTab(QWidget):
 
         count = 0
         bid = self._new_batch_id()
+        cur_idx = self._current_image_index
+        cur_has_batch = False
         for i, image in enumerate(self.model.images):
             before = len(image.tags)
             if tag_set & set(image.tags):
                 self._push_undo(i, list(image.tags), bid)
+                if i == cur_idx:
+                    cur_has_batch = True
                 image.tags = [t for t in image.tags if t not in tag_set]
                 self._auto_save_image(image)
             count += before - len(image.tags)
 
+        # Ensure current image has a batch entry so Ctrl+Z can find it
+        if not cur_has_batch and cur_idx >= 0:
+            cur_image = self.model.get_image(cur_idx)
+            if cur_image is not None:
+                self._push_undo(cur_idx, list(cur_image.tags), bid)
+
         self._rebuild_all_tags()
+
+        # Restore selection to next tag (or last item if at end)
+        if restore_row >= 0 and self.all_tags_list.count() > 0:
+            new_row = min(restore_row, self.all_tags_list.count() - 1)
+            self.all_tags_list.setCurrentRow(new_row)
+
         if self._current_image_index >= 0:
             image = self.model.get_image(self._current_image_index)
             if image:
