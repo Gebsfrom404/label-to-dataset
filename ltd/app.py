@@ -1,5 +1,7 @@
+from pathlib import Path
+
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QImageReader, QPalette
+from PySide6.QtGui import QColor, QIcon, QImageReader, QPalette
 from PySide6.QtWidgets import QApplication
 
 from ltd.settings import get_settings, DEFAULT_SETTINGS
@@ -66,6 +68,9 @@ def create_application() -> QApplication:
     app.setApplicationName('Label-to-Dataset')
     app.setApplicationDisplayName('Label-to-Dataset')
     app.setStyle('Fusion')
+    icon_path = Path(__file__).resolve().parent.parent / 'icon.png'
+    if icon_path.exists():
+        app.setWindowIcon(QIcon(str(icon_path)))
     QImageReader.setAllocationLimit(0)
 
     settings = get_settings()
