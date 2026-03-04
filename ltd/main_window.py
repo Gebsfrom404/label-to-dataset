@@ -67,8 +67,8 @@ class MainWindow(QMainWindow):
         self.modify_tab.load_from_label_tab(items, colors)
         self.tab_widget.setCurrentWidget(self.modify_tab)
 
-    def _on_copy_to_caption(self, items):
-        self.caption_tab.load_from_modify_tab(items)
+    def _on_copy_to_caption(self, folder_path: str):
+        self.caption_tab._load_directory(folder_path)
         self.tab_widget.setCurrentWidget(self.caption_tab)
 
     def _on_dataset_saved(self, path: str):

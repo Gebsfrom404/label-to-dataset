@@ -1107,18 +1107,6 @@ class CaptionTab(QWidget):
     # Loading
     # ------------------------------------------------------------------
 
-    def load_from_modify_tab(self, items: list[ImageItem]):
-        self._cancel_fullres_loader()
-        self._pixmap_cache.clear()
-        self._clear_undo_stacks()
-        self.model.load_items(items)
-        sep = self._get_separator()
-        for image in self.model.images:
-            image.load_tags_from_file(separator=sep)
-        self._rebuild_all_tags()
-        if self.model.rowCount() > 0:
-            self.image_list.select_index(0)
-
     def _load_directory(self, path: str):
         directory = Path(path)
         sep = self._get_separator()

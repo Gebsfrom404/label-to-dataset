@@ -29,3 +29,8 @@ explicit = true
 
 [project.scripts]
 ltd = "main:main"
+
+[tool.pyright]
+venvPath = "."
+venv = ".venv"
+useLibraryCodeForTypes = false

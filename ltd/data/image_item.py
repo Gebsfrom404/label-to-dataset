@@ -14,6 +14,7 @@ class ImageItem:
     tags: list[str] = field(default_factory=list)
     mask_path: Optional[Path] = None
     modified_path: Optional[Path] = None
+    original_path: Optional[Path] = None
     relative_path: str = ''
     _thumbnail: object = field(default=None, repr=False)
 
@@ -41,7 +42,8 @@ class ImageItem:
 
     @property
     def caption_path(self) -> Path:
-        return self.path.with_suffix('.txt')
+        base = self.original_path if self.original_path else self.path
+        return base.with_suffix('.txt')
 
     def load_tags_from_file(self, separator: str = ', '):
         """Load tags from the caption .txt file if it exists."""

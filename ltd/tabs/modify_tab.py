@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (QButtonGroup, QFileDialog, QGroupBox,
 from ltd.data.image_item import ImageItem
 from ltd.data.image_list_model import ImageListModel
 from ltd.data.label_data import DEFAULT_COLORS
-from ltd.utils.file_utils import get_temp_dir, get_temp_dir_no_clear
+from ltd.utils.file_utils import get_temp_dir_no_clear
 from ltd.utils.image_utils import load_pixmap_preview
 from ltd.utils.mask_utils import mask_from_qimage
 from ltd.widgets.canvas_widget import CanvasWidget, DrawMode, Tool
@@ -33,7 +33,7 @@ _TOOL_SPLIT_H = 'split_h'
 
 
 class ModifyTab(QWidget):
-    copy_to_caption_requested = Signal(list)  # list[ImageItem]
+    copy_to_caption_requested = Signal(str)  # folder path
 
     _PIXMAP_CACHE_MAX = 5
 
@@ -256,7 +256,7 @@ class ModifyTab(QWidget):
         self.save_in_place_btn = QPushButton('Save Modified In Place')
         output_layout.addWidget(self.save_in_place_btn)
 
-        self.copy_caption_btn = QPushButton('Copy to Caption')
+        self.copy_caption_btn = QPushButton('Open in Caption')
         output_layout.addWidget(self.copy_caption_btn)
 
         right_layout.addWidget(output_group)
@@ -1231,9 +1231,13 @@ class ModifyTab(QWidget):
         count = 0
         for image in modified:
             try:
-                shutil.copy2(str(image.modified_path), str(image.path))
+                save_target = image.original_path if image.original_path else image.path
+                shutil.copy2(str(image.modified_path), str(save_target))
+                if save_target != image.path:
+                    shutil.copy2(str(image.modified_path), str(image.path))
                 self._pixmap_cache.pop(str(image.path), None)
                 self._pixmap_cache.pop(str(image.modified_path), None)
+                self._pixmap_cache.pop(str(save_target), None)
                 image.modified_path = None
                 idx = self.model.images.index(image)
                 self.model.invalidate_thumbnail(idx)
@@ -1248,17 +1252,25 @@ class ModifyTab(QWidget):
         self.mod_status.setText(f'Saved {count} modified images in place')
 
     def _copy_to_caption(self):
-        temp_dir = get_temp_dir('caption')
-        items = []
-        for image in self.model.images:
-            source = image.modified_path if image.modified_path else image.path
-            dest = temp_dir / image.filename
-            shutil.copy2(source, dest)
-            item = ImageItem(path=dest, width=image.width,
-                             height=image.height)
-            items.append(item)
+        if not self.model.images:
+            QMessageBox.information(self, 'Info', 'No images to open.')
+            return
 
-        if items:
-            self.copy_to_caption_requested.emit(items)
-        else:
-            QMessageBox.information(self, 'Info', 'No images to copy.')
+        # Check for unsaved modifications
+        modified = [img for img in self.model.images if img.modified_path]
+        if modified:
+            reply = QMessageBox.question(
+                self, 'Unsaved Modifications',
+                f'{len(modified)} image(s) have unsaved modifications.\n'
+                f'Save them in place before opening in Caption?',
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Yes)
+            if reply == QMessageBox.StandardButton.Cancel:
+                return
+            if reply == QMessageBox.StandardButton.Yes:
+                self._save_modified_in_place()
+
+        first = self.model.images[0]
+        folder = first.original_path.parent if first.original_path else first.path.parent
+        self.copy_to_caption_requested.emit(str(folder))

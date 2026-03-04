@@ -228,13 +228,13 @@ class LabelTab(QWidget):
         self.save_masks_btn = QPushButton('Save Masks...')
         output_layout.addWidget(self.save_masks_btn)
 
-        self.copy_modify_btn = QPushButton('Copy to Modify')
+        self.copy_modify_btn = QPushButton('Proceed to Modify')
         output_layout.addWidget(self.copy_modify_btn)
 
         self.save_dataset_btn = QPushButton('Save as YOLO Dataset...')
         output_layout.addWidget(self.save_dataset_btn)
 
-        self.copy_train_btn = QPushButton('Copy to Train')
+        self.copy_train_btn = QPushButton('Proceed to Train')
         output_layout.addWidget(self.copy_train_btn)
 
         right_layout.addWidget(output_group)
@@ -1037,7 +1037,8 @@ class LabelTab(QWidget):
                 save_mask(merged, mask_path)
             item = ImageItem(path=dest_img, width=image.width,
                              height=image.height, mask_path=mask_path,
-                             labels=list(image.labels))
+                             labels=list(image.labels),
+                             original_path=image.path)
             items.append(item)
 
         if items:
