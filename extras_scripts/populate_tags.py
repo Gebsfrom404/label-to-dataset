@@ -8,7 +8,7 @@ from urllib.error import HTTPError, URLError
 import json
 
 SCRIPT_INFO = {
-    'name': 'Populate Tag Autocomplete',
+    'name': 'Populate Caption Tags Autocomplete',
     'description': (
         'Download tags from Danbooru or e621 API to tags.csv '
         'for autocomplete in the Caption tab. '

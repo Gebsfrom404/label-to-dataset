@@ -241,6 +241,14 @@ class ExtrasTab(QWidget):
         )
         panel.content_layout.addWidget(exec_btn)
 
+        # Project link
+        if info.get('project_url'):
+            url = info['project_url']
+            link_label = QLabel(f'<a href="{url}">{url}</a>')
+            link_label.setStyleSheet('font-size: 11px;')
+            link_label.setOpenExternalLinks(True)
+            panel.content_layout.addWidget(link_label)
+
         self._container_layout.addWidget(panel)
         self._scripts.append({
             'mod': mod, 'panel': panel, 'widgets': param_widgets,
