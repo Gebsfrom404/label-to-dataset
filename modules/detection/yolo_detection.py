@@ -131,7 +131,33 @@ class YoloDetectionModule(BaseDetectionModule):
             h, w = result.orig_shape
             task = self._model.task
 
-            if task == 'segment' and result.masks is not None:
+            if task == 'obb' and result.obb is not None:
+                for i, corners in enumerate(result.obb.xyxyxyxy):
+                    cls_id = int(result.obb.cls[i].item())
+                    conf = float(result.obb.conf[i].item())
+                    cls_name = result.names[cls_id]
+
+                    # Convert 4 corner points to normalized polygon
+                    pts = corners.tolist()  # [[x1,y1],[x2,y2],[x3,y3],[x4,y4]]
+                    polygon = [(pt[0] / w, pt[1] / h) for pt in pts]
+
+                    # Infer bbox from polygon
+                    xs = [p[0] for p in polygon]
+                    ys = [p[1] for p in polygon]
+                    cx = (min(xs) + max(xs)) / 2
+                    cy = (min(ys) + max(ys)) / 2
+                    bw = max(xs) - min(xs)
+                    bh = max(ys) - min(ys)
+
+                    detections.append({
+                        'class_id': cls_id,
+                        'class_name': cls_name,
+                        'confidence': conf,
+                        'bbox': (cx, cy, bw, bh),
+                        'polygon': polygon,
+                        'mask': None,
+                    })
+            elif task == 'segment' and result.masks is not None:
                 for i, mask_xy in enumerate(result.masks.xy):
                     cls_id = int(result.boxes.cls[i].item())
                     conf = float(result.boxes.conf[i].item())

@@ -110,11 +110,14 @@ class TagDictionary:
             if any(q in alias.lower() for alias in tag.aliases):
                 results.append(tag)
 
-        # Sort: current image tags first, then dataset tags, then rest
+        # Sort: exact match first, then current image tags, dataset tags, rest
         def sort_key(t):
+            dn = t.display_name.lower()
+            exact = dn == q or t.name.lower() == q
+            starts = dn.startswith(q) or t.name.lower().startswith(q.replace(' ', '_'))
             in_current = t.display_name in used or t.name in used
             in_session = t.display_name in session or t.name in session
-            return (not in_current, not in_session, -t.post_count)
+            return (not exact, not starts, not in_current, not in_session, -t.post_count)
         results.sort(key=sort_key)
         return results[:limit]
 
