@@ -1,8 +1,15 @@
+import sys
 from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QIcon, QImageReader, QPalette
 from PySide6.QtWidgets import QApplication
+
+if sys.platform == 'win32':
+    import ctypes
+    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+        'label-to-dataset.label-to-dataset'
+    )
 
 from ltd.settings import get_settings, DEFAULT_SETTINGS
 
