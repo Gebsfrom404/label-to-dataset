@@ -1815,6 +1815,8 @@ class CaptionTab(QWidget):
         self.caption_selected_btn.setEnabled(True)
         self.caption_all_btn.setEnabled(True)
         self._worker = None
+        from ltd.utils.sound import play_completion_sound
+        play_completion_sound()
 
     def _on_caption_error(self, msg):
         QMessageBox.critical(self, 'Captioning Error', msg)

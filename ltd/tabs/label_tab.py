@@ -979,6 +979,8 @@ class LabelTab(QWidget):
         self.auto_label_unlabeled_btn.setEnabled(True)
         self._worker = None
         self.image_list.reapply_filter()
+        from ltd.utils.sound import play_completion_sound
+        play_completion_sound()
 
     def _on_detection_error(self, msg):
         QMessageBox.critical(self, 'Detection Error', msg)

@@ -216,3 +216,5 @@ class TrainTab(QWidget):
         self.start_btn.setEnabled(True)
         self.cancel_btn.setVisible(False)
         self._worker = None
+        from ltd.utils.sound import play_completion_sound
+        play_completion_sound()

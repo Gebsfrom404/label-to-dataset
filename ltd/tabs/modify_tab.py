@@ -1150,6 +1150,8 @@ class ModifyTab(QWidget):
         self.cancel_btn.setVisible(False)
         self._set_run_buttons_enabled(True)
         self._worker = None
+        from ltd.utils.sound import play_completion_sound
+        play_completion_sound()
 
     def _on_mod_error(self, msg):
         QMessageBox.critical(self, 'Modification Error', msg)
