@@ -2,9 +2,6 @@ import sys
 import warnings
 import logging
 
-from ltd.app import create_application
-from ltd.main_window import MainWindow
-
 
 def suppress_warnings():
     environment = __import__('os').getenv('LTD_ENVIRONMENT')
@@ -16,6 +13,16 @@ def suppress_warnings():
 
 def main():
     suppress_warnings()
+
+    if sys.platform == 'win32':
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            'label-to-dataset.label-to-dataset'
+        )
+
+    from ltd.app import create_application
+    from ltd.main_window import MainWindow
+
     app = create_application()
     window = MainWindow(app)
     window.show()
