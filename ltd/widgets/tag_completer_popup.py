@@ -117,19 +117,6 @@ class TagCompleterPopup(QWidget):
             # Sort: current image tags first, then alphabetical
             extra.sort(key=lambda t: (t not in current_tags, t.lower()))
 
-            for tag in extra:
-                is_used = tag in current_tags
-                color = self._tag_dict.get_color(tag, dark=dark)
-                item = QListWidgetItem()
-                item.setData(Qt.ItemDataRole.UserRole, {
-                    'display': tag,
-                    'count': '',
-                    'color': color,
-                    'used': is_used,
-                })
-                item.setData(Qt.ItemDataRole.DisplayRole, tag)
-                self._list.addItem(item)
-
             for dt in results:
                 item = QListWidgetItem()
                 color = self._tag_dict.get_color(dt.display_name, dark=dark)
@@ -143,6 +130,19 @@ class TagCompleterPopup(QWidget):
                     'used': is_used,
                 })
                 item.setData(Qt.ItemDataRole.DisplayRole, dt.display_name)
+                self._list.addItem(item)
+
+            for tag in extra:
+                is_used = tag in current_tags
+                color = self._tag_dict.get_color(tag, dark=dark)
+                item = QListWidgetItem()
+                item.setData(Qt.ItemDataRole.UserRole, {
+                    'display': tag,
+                    'count': '',
+                    'color': color,
+                    'used': is_used,
+                })
+                item.setData(Qt.ItemDataRole.DisplayRole, tag)
                 self._list.addItem(item)
         else:
             # Fallback: session tags (used tags on top)
