@@ -1403,6 +1403,7 @@ class CaptionTab(QWidget):
             return
 
         # Single image: add to tags list widget
+        first_new_row = self.tags_list.count()
         for tag in new_tags:
             item = QListWidgetItem(tag)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
@@ -1411,7 +1412,15 @@ class CaptionTab(QWidget):
         self.tag_input.clear()
         if self.tags_list.count() > 0:
             self.tags_list.scrollToBottom()
-            self.tags_list.setCurrentRow(self.tags_list.count() - 1)
+            self.tags_list.clearSelection()
+            if len(new_tags) == 1:
+                # Single tag: select only the last added
+                self.tags_list.setCurrentRow(self.tags_list.count() - 1)
+            else:
+                # Multiple comma-separated tags: select all newly added
+                for row in range(first_new_row, self.tags_list.count()):
+                    self.tags_list.item(row).setSelected(True)
+                self.tags_list.setCurrentRow(self.tags_list.count() - 1)
         self._on_tags_list_changed()
 
     def _remove_selected_tags(self):
