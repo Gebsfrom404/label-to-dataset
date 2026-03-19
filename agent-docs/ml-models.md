@@ -25,27 +25,32 @@ Mask dilation controlled by `mask_grow` setting (default 5px).
 
 Auto-captioning using SmilingWolf WD tagger models. Implemented in caption_tab.py.
 
-### Stack: ONNX Runtime
+### Stack: timm + safetensors (PyTorch)
 
-Uses `onnxruntime.InferenceSession` for inference. This matches the original SmilingWolf model format and produces correct results.
+Uses `timm.create_model()` with safetensors weights for inference. GPU-accelerated via PyTorch CUDA.
 
 ```python
-from onnxruntime import InferenceSession
-self._model = InferenceSession(str(model_path))
-probs = self._model.run([output_name], {input_name: arr})[0][0]
+import timm
+from safetensors.torch import load_file
+model = timm.create_model(arch, pretrained=False, num_classes=num_classes, **model_args)
+state_dict = load_file(str(model_path))
+model.load_state_dict(state_dict)
 ```
+
+**Critical**: Must pass `model_args` from `config.json` (includes `ref_feat_shape`) to `timm.create_model()`. Without it, EVA02 attention produces different outputs.
 
 ### Auto-download
 
-Models downloaded via `huggingface_hub.hf_hub_download()` to `models/caption/`. Files: `model.onnx`, `selected_tags.csv`.
+Models downloaded via `huggingface_hub.hf_hub_download()` to `models/caption/`. Files: `model.safetensors`, `selected_tags.csv`, `config.json`.
 
-### Preprocessing — BGR, no normalization
+### Preprocessing — BGR, normalized, NCHW
 
-**Critical**: SmilingWolf ONNX models expect BGR channel order (OpenCV convention) with raw float32 values (NOT normalized to [-1,1]).
+**Critical**: SmilingWolf models expect BGR channel order. Normalize with mean=0.5/std=0.5, NCHW format for PyTorch.
 
 ```python
-arr = np.array(canvas, dtype=np.float32)[:, :, ::-1]  # RGB→BGR
-arr = np.expand_dims(arr, axis=0)  # add batch dim (NHWC)
+arr = np.array(canvas, dtype=np.float32)[:, :, ::-1] / 255.0  # RGB→BGR + scale
+arr = (arr - 0.5) / 0.5  # normalize to [-1, 1]
+tensor = torch.from_numpy(arr.copy()).permute(2, 0, 1).unsqueeze(0)  # NCHW
 ```
 
-Input dimension is read from the model: `self._model.get_inputs()[0].shape`.
+Input dimension hardcoded to 448 (from config).
