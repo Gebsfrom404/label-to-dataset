@@ -60,13 +60,15 @@ Plain `.txt` files with tags, stored alongside images.
 - Separator configurable in Caption tab UI (default: `, `). Supports escape sequences (`\n`, `\t`).
 - Auto-saved to disk on every tag edit (no manual save needed, but "Save All" still available)
 - Undo/redo per-image (Ctrl+Z / Ctrl+Y) with snapshot-based stacks
-- Tag dictionary from `tags.csv` (danbooru/e621 CSV format) provides autocomplete and category colors
+- Tag dictionary from `autocompletions/` folder provides autocomplete and category colors
 
-## Tag Dictionary (`tags.csv`)
+## Tag Dictionary (`autocompletions/`)
 
-CSV format: `tag_name,category_id,post_count,"aliases"`. Loaded by `ltd/data/tag_dictionary.py`.
+Tags loaded from `autocompletions/` directory by `ltd/data/tag_dictionary.py`:
+- `*.parquet` files: downloaded via Extras tab script `download_autocompletions_list.py` from HuggingFace (`deepghs/site_tags`). Columns: `name`, `category`, `post_count`. Loaded first (higher priority).
+- `custom_tags.txt`: user-defined tags, one per line. Category 0 (General), post_count 0. Won't override parquet tags.
+- Falls back to legacy `tags.csv` if `autocompletions/` folder doesn't exist.
 - Categories: 0=General, 1=Artist, 3=Copyright, 4=Character, 5=Meta (each has dark/light theme colors)
-- Populated via Extras tab script `populate_tags.py` from bundled reference CSVs
 - Used for autocomplete popup (`ltd/widgets/tag_completer_popup.py`) and tag coloring in lists
 
 ## Temp Folder Management (`ltd/utils/file_utils.py`)

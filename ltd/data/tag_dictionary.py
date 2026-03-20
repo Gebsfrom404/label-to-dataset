@@ -1,4 +1,4 @@
-"""Tag dictionary loaded from CSV for autocomplete and category colors."""
+"""Tag dictionary loaded from CSV/parquet/txt for autocomplete and category colors."""
 import csv
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -85,6 +85,99 @@ class TagDictionary:
                 self._by_name[name.lower()] = tag
 
         self._loaded = bool(self._tags)
+
+    def load_parquet(self, path: Path):
+        """Load tags from a parquet file with columns: name, category, post_count, aliases."""
+        if not path.exists():
+            return
+        try:
+            import pyarrow.parquet as pq
+        except ImportError:
+            return
+
+        table = pq.read_table(path)
+        columns = table.column_names
+        if 'name' not in columns:
+            return
+
+        names = table.column('name').to_pylist()
+        categories = table.column('category').to_pylist() if 'category' in columns else [0] * len(names)
+        post_counts = table.column('post_count').to_pylist() if 'post_count' in columns else [0] * len(names)
+        alias_col = table.column('aliases').to_pylist() if 'aliases' in columns else [''] * len(names)
+
+        for name, cat, count, alias_str in zip(names, categories, post_counts, alias_col):
+            name = str(name).strip()
+            if not name:
+                continue
+            display_name = name.replace('_', ' ')
+            aliases = []
+            if alias_str and str(alias_str).strip():
+                aliases = [a.strip().replace('_', ' ')
+                           for a in str(alias_str).split(',') if a.strip()]
+            tag = DictTag(
+                name=name,
+                display_name=display_name,
+                category=int(cat) if cat else 0,
+                post_count=int(count) if count else 0,
+                aliases=aliases,
+            )
+            self._tags.append(tag)
+            key = display_name.lower()
+            if key not in self._by_display:
+                self._by_display[key] = tag
+                self._by_name[name.lower()] = tag
+
+        self._loaded = bool(self._tags)
+
+    def load_custom_txt(self, path: Path):
+        """Load user-defined tags from a newline-separated text file.
+
+        Tags loaded here get category 0 (General) and post_count 0.
+        They won't override tags already loaded from parquet/csv.
+        """
+        if not path.exists():
+            return
+
+        with open(path, 'r', encoding='utf-8', errors='replace') as f:
+            for line in f:
+                name = line.strip()
+                if not name:
+                    continue
+                display_name = name.replace('_', ' ')
+                key = display_name.lower()
+                if key in self._by_display:
+                    continue
+                tag = DictTag(
+                    name=name,
+                    display_name=display_name,
+                    category=0,
+                    post_count=0,
+                )
+                self._tags.append(tag)
+                self._by_display[key] = tag
+                self._by_name[name.lower()] = tag
+
+        self._loaded = bool(self._tags)
+
+    def load_directory(self, directory: Path):
+        """Load tags from the autocompletions directory.
+
+        Loads parquet files first (higher priority), then custom_tags.txt.
+        Custom tags won't override parquet tags.
+        """
+        if not directory.is_dir():
+            return
+
+        self._tags.clear()
+        self._by_display.clear()
+        self._by_name.clear()
+        self._loaded = False
+
+        for parquet_file in sorted(directory.glob('*.parquet')):
+            self.load_parquet(parquet_file)
+
+        custom_path = directory / 'custom_tags.txt'
+        self.load_custom_txt(custom_path)
 
     def search(self, query: str, limit: int = 50,
                used_tags: set[str] | None = None,

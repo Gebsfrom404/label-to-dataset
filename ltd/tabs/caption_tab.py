@@ -554,9 +554,11 @@ class CaptionTab(QWidget):
 
         # Tag dictionary for autocomplete + colors
         self._tag_dict = TagDictionary()
-        csv_path = Path('tags.csv')
-        if csv_path.exists():
-            self._tag_dict.load_csv(csv_path)
+        autocomp_dir = Path('autocompletions')
+        if autocomp_dir.is_dir():
+            self._tag_dict.load_directory(autocomp_dir)
+        elif Path('tags.csv').exists():
+            self._tag_dict.load_csv(Path('tags.csv'))
 
         self._setup_ui()
         self._tag_popup = TagCompleterPopup(self._tag_dict, self)
@@ -756,6 +758,14 @@ class CaptionTab(QWidget):
         snapshot_layout.addWidget(self.snapshot_restore_some_btn)
         tools_layout.addWidget(snapshot_group)
 
+        tools_row3 = QHBoxLayout()
+        self.reload_autocompletions_btn = QPushButton('Reload Autocompletions')
+        self.reload_autocompletions_btn.setToolTip(
+            'Reload tag dictionary from autocompletions/ folder')
+        tools_row3.addWidget(self.reload_autocompletions_btn)
+        tools_row3.addStretch()
+        tools_layout.addLayout(tools_row3)
+
         tools_layout.addStretch()
         self.right_tabs.addTab(tools_tab, 'Tools')
 
@@ -863,6 +873,8 @@ class CaptionTab(QWidget):
             self._restore_some_from_snapshot)
         self.remove_dupes_all_btn.clicked.connect(
             self._remove_duplicates_all)
+        self.reload_autocompletions_btn.clicked.connect(
+            self._reload_autocompletions)
 
         # Save / separator
         self.save_captions_btn.clicked.connect(self._save_all_captions)
@@ -1167,6 +1179,22 @@ class CaptionTab(QWidget):
                 self._update_token_count()
         self.caption_status.setText(
             f'Reloaded tags for {len(self.model.images)} image(s)')
+
+    def _reload_autocompletions(self):
+        """Reload the tag dictionary from autocompletions/ folder."""
+        self._tag_dict = TagDictionary()
+        autocomp_dir = Path('autocompletions')
+        if autocomp_dir.is_dir():
+            self._tag_dict.load_directory(autocomp_dir)
+        elif Path('tags.csv').exists():
+            self._tag_dict.load_csv(Path('tags.csv'))
+
+        self._tag_popup.set_dictionary(self._tag_dict)
+        dark = get_settings().value('theme', 'dark', type=str) == 'dark'
+        self.tags_list.set_tag_dictionary(self._tag_dict, dark=dark)
+        count = len(self._tag_dict._tags) if self._tag_dict.is_loaded() else 0
+        self.caption_status.setText(
+            f'Reloaded autocompletions ({count} tags)')
 
     # ------------------------------------------------------------------
     # Image selection

@@ -88,6 +88,9 @@ class TagCompleterPopup(QWidget):
         self.setFixedWidth(350)
         self.setMaximumHeight(300)
 
+    def set_dictionary(self, tag_dict: TagDictionary):
+        self._tag_dict = tag_dict
+
     def set_session_tags(self, tags: list[str]):
         """Set session tags for fallback completion."""
         self._session_tags = tags
