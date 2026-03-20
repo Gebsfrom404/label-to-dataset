@@ -3,6 +3,7 @@ from pathlib import Path
 
 SCRIPT_INFO = {
     'name': 'Rename && Reformat gallery-dl e621 Tag Files',
+    'type': 'tags',
     'description': 'Remove .png/.jpg from txt filenames and convert newline-delimited tags to comma-separated',
     'parameters': [
         {'name': 'input_folder', 'type': 'folder', 'label': 'Input Folder', 'default': ''},

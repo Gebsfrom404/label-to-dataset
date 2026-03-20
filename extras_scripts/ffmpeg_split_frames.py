@@ -3,6 +3,7 @@ import shutil
 
 SCRIPT_INFO = {
     'name': 'Split GIFs and Videos into Frames with ffmpeg',
+    'type': 'video-to-images',
     'description': 'Extract frames from .gif, .webm, .mp4 files using ffmpeg',
     'parameters': [
         {'name': 'source_folder', 'type': 'folder', 'label': 'Source Folder', 'default': ''},

@@ -23,6 +23,7 @@ SOURCES = [
 
 SCRIPT_INFO = {
     'name': 'Download Autocompletions List',
+    'type': 'tags',
     'description': (
         'Download a tag database from HuggingFace (deepghs/site_tags) '
         'for autocomplete in the Caption tab. '

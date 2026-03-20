@@ -125,17 +125,31 @@ class ExtrasTab(QWidget):
         self._discover_scripts()
 
     def _discover_scripts(self):
-        """Scan extras_scripts/ and build panels."""
+        """Scan extras_scripts/ and build panels grouped by script type."""
         if not EXTRAS_DIR.is_dir():
             return
 
+        # Collect modules grouped by type, preserving discovery order within groups
+        groups: dict[str, list] = {}
         for py_file in sorted(EXTRAS_DIR.glob('*.py')):
             if py_file.name.startswith('_'):
                 continue
             mod = _load_script(py_file)
             if mod is None:
                 continue
-            self._add_script_panel(mod)
+            script_type = mod.SCRIPT_INFO.get('type', 'other')
+            groups.setdefault(script_type, []).append(mod)
+
+        for group_type, modules in groups.items():
+            # Group header label
+            header = QLabel(group_type.replace('-', ' ').title())
+            header.setStyleSheet(
+                'font-size: 14px; font-weight: bold; padding: 8px 4px 2px 4px;'
+            )
+            self._container_layout.addWidget(header)
+
+            for mod in modules:
+                self._add_script_panel(mod)
 
     def _settings_key(self, script_stem: str, param_name: str) -> str:
         return f'extras/{script_stem}/{param_name}'

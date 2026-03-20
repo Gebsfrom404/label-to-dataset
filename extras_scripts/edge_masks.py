@@ -6,6 +6,7 @@ import numpy as np
 
 SCRIPT_INFO = {
     'name': 'Generate Masks for Black Edges',
+    'type': 'masks',
     'description': 'Detect black borders in images and generate binary mask files (white=keep, black=border)',
     'parameters': [
         {'name': 'input_folder', 'type': 'folder', 'label': 'Input Folder', 'default': ''},

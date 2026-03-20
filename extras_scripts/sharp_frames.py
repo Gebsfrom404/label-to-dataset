@@ -6,6 +6,7 @@ from pathlib import Path
 
 SCRIPT_INFO = {
     'name': 'Extract Sharp Frames from Videos',
+    'type': 'video-to-images',
     'description': (
         'Use sharp-frames (via uvx) to extract the sharpest frames from videos. '
         'Frame count = ceil(duration / ln(duration)), capped at 100.'

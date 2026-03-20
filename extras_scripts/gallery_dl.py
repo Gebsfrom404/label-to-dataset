@@ -3,6 +3,7 @@ import shutil
 
 SCRIPT_INFO = {
     'name': 'Download with gallery-dl',
+    'type': 'downloader',
     'description': 'Download images from URLs using gallery-dl',
     'parameters': [
         {'name': 'download_link', 'type': 'str', 'label': 'Download Link', 'default': '', 'placeholder': 'https://...'},
