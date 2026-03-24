@@ -114,8 +114,8 @@ class YoloDetectionModule(BaseDetectionModule):
 
     def run(self, image_path: Path, **kwargs) -> list[dict]:
         self._ensure_model()
-        import cv2
-        img = cv2.imread(str(image_path))
+        from ltd.utils.file_utils import cv_imread
+        img = cv_imread(image_path)
         if img is None:
             return []
 

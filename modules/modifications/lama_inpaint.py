@@ -8,6 +8,10 @@ from PySide6.QtWidgets import (QFileDialog, QHBoxLayout, QLabel, QPushButton,
 
 from modules.base import BaseModificationModule
 
+_HF_REPO = 'michaelgold/big-lama'
+_HF_FILENAME = 'big-lama.safetensors'
+_DEFAULT_MODEL_DIR = Path('./models/lama')
+
 
 class LamaInpaintModule(BaseModificationModule):
 
@@ -17,6 +21,8 @@ class LamaInpaintModule(BaseModificationModule):
         self._mask_grow = 5
         self._settings_widget = None
         self._model_path_label = None
+        self._device = None
+        self._is_jit = False
         self._restore_settings()
 
     @property
@@ -35,7 +41,7 @@ class LamaInpaintModule(BaseModificationModule):
         path_layout = QHBoxLayout()
         path_layout.addWidget(QLabel('Model:'))
         label_text = (Path(self._model_path).name if self._model_path
-                      else 'No model selected')
+                      else 'Auto-download')
         self._model_path_label = QLabel(label_text)
         self._model_path_label.setWordWrap(True)
         path_layout.addWidget(self._model_path_label, stretch=1)
@@ -61,8 +67,8 @@ class LamaInpaintModule(BaseModificationModule):
 
     def _browse_model(self):
         path, _ = QFileDialog.getOpenFileName(
-            None, 'Select big-lama Model', './models/lama',
-            'PyTorch Models (*.pt);;All Files (*)')
+            None, 'Select big-lama Model', str(_DEFAULT_MODEL_DIR),
+            'Model Files (*.safetensors *.pt);;All Files (*)')
         if path:
             self._model_path = path
             self._model_path_label.setText(Path(path).name)
@@ -87,23 +93,80 @@ class LamaInpaintModule(BaseModificationModule):
             self._model_path = path
         self._mask_grow = settings.value('lama_inpaint/mask_grow', 5, type=int)
 
+    def _download_model(self) -> Path:
+        """Download big-lama.safetensors from HuggingFace if not present."""
+        import huggingface_hub
+
+        model_dir = _DEFAULT_MODEL_DIR
+        model_dir.mkdir(parents=True, exist_ok=True)
+        model_path = model_dir / _HF_FILENAME
+
+        if not model_path.exists():
+            huggingface_hub.hf_hub_download(
+                _HF_REPO, filename=_HF_FILENAME,
+                local_dir=str(model_dir))
+
+        return model_path
+
     def _ensure_model(self):
-        if self._model is None:
-            if not self._model_path:
-                raise ValueError('No big-lama model selected. '
-                                 'Download big-lama.pt to ./models/lama/')
-            import torch
-            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        if self._model is not None:
+            return
+
+        import torch
+
+        # Auto-download if no model path configured
+        if not self._model_path:
+            safetensors_path = self._download_model()
+            self._model_path = str(safetensors_path)
+            if self._model_path_label is not None:
+                self._model_path_label.setText(safetensors_path.name)
+            self._save_settings()
+
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self._device = device
+
+        if self._model_path.endswith('.safetensors'):
+            self._load_safetensors(self._model_path, device)
+            self._is_jit = False
+        else:
             self._model = torch.jit.load(self._model_path,
                                           map_location=device).eval()
-            self._device = device
+            self._is_jit = True
+
+    def _load_safetensors(self, path: str, device):
+        import torch
+        from safetensors.torch import load_file
+        from modules.modifications.lama_arch import FFCResNetGenerator
+
+        state_dict = load_file(path)
+
+        # Strip 'generator.' prefix (HuggingFace big-lama format)
+        prefix = 'generator.'
+        if any(k.startswith(prefix) for k in state_dict):
+            state_dict = {k[len(prefix):] if k.startswith(prefix) else k: v
+                          for k, v in state_dict.items()}
+
+        # Auto-detect block count from state dict keys
+        resnet_indices = {int(k.split('.')[1]) for k in state_dict
+                          if k.startswith('model.') and k.split('.')[1].isdigit()
+                          and '.conv1.ffc.' in k}
+        n_blocks = len(resnet_indices) if resnet_indices else 18
+
+        has_lfu = any('lfu' in k for k in state_dict)
+
+        model = FFCResNetGenerator(input_nc=4, output_nc=3, ngf=64,
+                                   n_downsampling=3, n_blocks=n_blocks,
+                                   enable_lfu=has_lfu)
+        model.load_state_dict(state_dict, strict=True)
+        self._model = model.to(device).eval()
 
     def run(self, image_path: Path, mask_path: Path, **kwargs) -> Path:
         import torch
         self._ensure_model()
 
-        image = cv2.imread(str(image_path))
-        mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+        from ltd.utils.file_utils import cv_imread
+        image = cv_imread(image_path)
+        mask = cv_imread(mask_path, cv2.IMREAD_GRAYSCALE)
 
         if image is None:
             raise FileNotFoundError(f'Cannot read image: {image_path}')
@@ -144,7 +207,14 @@ class LamaInpaintModule(BaseModificationModule):
         mask_tensor = self._prepare_mask(mask)
 
         with torch.inference_mode():
-            inpainted = self._model(img_tensor, mask_tensor)
+            if self._is_jit:
+                inpainted = self._model(img_tensor, mask_tensor)
+            else:
+                masked_image = img_tensor * (1 - mask_tensor)
+                inp = torch.cat([masked_image, mask_tensor], dim=1)
+                inpainted = self._model(inp)
+                # Composite: keep original pixels outside mask
+                inpainted = img_tensor * (1 - mask_tensor) + inpainted * mask_tensor
             result = inpainted[0].permute(1, 2, 0).detach().cpu().numpy()
             result = np.clip(result * 255, 0, 255).astype(np.uint8)
         del img_tensor, mask_tensor, inpainted
@@ -163,7 +233,8 @@ class LamaInpaintModule(BaseModificationModule):
         from ltd.utils.file_utils import get_temp_dir_no_clear
         output_dir = get_temp_dir_no_clear('lama_output')
         output_path = output_dir / f'{image_path.stem}_inpainted.png'
-        cv2.imwrite(str(output_path), result)
+        from ltd.utils.file_utils import cv_imwrite
+        cv_imwrite(output_path, result)
         return output_path
 
     def _prepare_image(self, image: np.ndarray):

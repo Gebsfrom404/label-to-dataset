@@ -107,14 +107,16 @@ def masks_overlap(mask_a: np.ndarray, mask_b: np.ndarray) -> bool:
 
 def save_mask(mask: np.ndarray, path: Path):
     """Save a binary mask as PNG."""
-    cv2.imwrite(str(path), mask)
+    from ltd.utils.file_utils import cv_imwrite
+    cv_imwrite(path, mask)
 
 
 def load_mask(path: Path) -> np.ndarray | None:
     """Load a mask from a PNG file."""
     if not path.exists():
         return None
-    mask = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+    from ltd.utils.file_utils import cv_imread
+    mask = cv_imread(path, cv2.IMREAD_GRAYSCALE)
     return mask
 
 

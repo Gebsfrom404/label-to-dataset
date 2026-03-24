@@ -92,8 +92,9 @@ class ComfyUIDetectionModule(BaseDetectionModule):
         detections = []
         # Process output masks
         import cv2
+        from ltd.utils.file_utils import cv_imread
         for output_file in result['files']:
-            mask = cv2.imread(str(output_file), cv2.IMREAD_GRAYSCALE)
+            mask = cv_imread(output_file, cv2.IMREAD_GRAYSCALE)
             if mask is not None:
                 # Threshold
                 _, mask = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)

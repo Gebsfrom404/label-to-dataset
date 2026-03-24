@@ -2,6 +2,9 @@ import shutil
 import tempfile
 from pathlib import Path
 
+import cv2
+import numpy as np
+
 _TEMP_ROOT = Path(tempfile.gettempdir()) / 'label-to-dataset'
 
 
@@ -38,3 +41,21 @@ def ensure_dir(path: Path) -> Path:
     """Ensure a directory exists."""
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def cv_imread(path: Path | str, flags: int = cv2.IMREAD_COLOR) -> np.ndarray | None:
+    """Unicode-safe cv2.imread (handles non-ASCII paths on Windows)."""
+    data = np.fromfile(str(path), dtype=np.uint8)
+    img = cv2.imdecode(data, flags)
+    return img
+
+
+def cv_imwrite(path: Path | str, img: np.ndarray,
+               params: list[int] | None = None) -> bool:
+    """Unicode-safe cv2.imwrite (handles non-ASCII paths on Windows)."""
+    ext = Path(path).suffix
+    success, buf = cv2.imencode(ext, img, params or [])
+    if not success:
+        return False
+    buf.tofile(str(path))
+    return True
