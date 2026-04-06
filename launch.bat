@@ -17,5 +17,6 @@ call %VENV_DIR%\Scripts\activate.bat
 
 echo Starting Label-to-Dataset...
 python main.py
+if %errorlevel% neq 0 pause
 
 endlocal

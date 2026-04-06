@@ -15,3 +15,7 @@ source "$VENV_DIR/bin/activate"
 
 echo "Starting Label-to-Dataset..."
 python main.py
+if [ $? -ne 0 ]; then
+    echo "Press Enter to continue..."
+    read
+fi
