@@ -30,6 +30,7 @@ from ltd.dialogs.find_replace_dialog import FindReplaceDialog
 from ltd.utils.file_utils import get_temp_dir
 from ltd.utils.image_utils import load_pixmap, load_pixmap_preview
 from ltd.widgets.caption_image_list import CaptionImageList
+from ltd.widgets.elided_label import ElidedLabel
 from ltd.widgets.loading_dialog import loading_dialog
 from ltd.widgets.tag_completer_popup import TagCompleterPopup
 from ltd.widgets.workflow_selector import WorkflowSelector
@@ -141,6 +142,8 @@ class WdTaggerCaptioner:
         tensor = tensor.to(self._device)
 
         with torch.no_grad():
+            if not self._model:
+                raise ValueError('Failed to load model')
             logits = self._model(tensor)
             probs = torch.sigmoid(logits)[0].cpu().numpy()
 
@@ -339,6 +342,7 @@ class AllTagsList(QListWidget):
         act_filter = menu.addAction(f'Filter images by "{tag}"')
         menu.addSeparator()
         selected = self.selectedIndexes()
+        tags = []
         if len(selected) > 1:
             tags = [self._get_tag_at(self.item(idx.row()))
                     for idx in selected]
@@ -794,7 +798,7 @@ class CaptionTab(QWidget):
         self.export_captions_btn = QPushButton('Export Images + Captions...')
         right_layout.addWidget(self.export_captions_btn)
 
-        self.caption_status = QLabel('')
+        self.caption_status = ElidedLabel('')
         right_layout.addWidget(self.caption_status)
 
         splitter.addWidget(right)

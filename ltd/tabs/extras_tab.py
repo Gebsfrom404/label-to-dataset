@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
 
 from ltd.settings import get_settings
 from ltd.widgets.collapsible_panel import CollapsiblePanel
+from ltd.widgets.elided_label import ElidedLabel
 
 logger = logging.getLogger(__name__)
 
@@ -242,7 +243,7 @@ class ExtrasTab(QWidget):
             progress_bar = QProgressBar()
             progress_bar.setVisible(False)
             panel.content_layout.addWidget(progress_bar)
-            status_label = QLabel()
+            status_label = ElidedLabel()
             status_label.setStyleSheet('font-size: 11px;')
             status_label.setVisible(False)
             panel.content_layout.addWidget(status_label)

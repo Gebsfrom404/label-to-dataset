@@ -29,6 +29,7 @@ from ltd.utils.yolo_format import read_yolo_labels, write_yolo_labels
 from ltd.widgets.canvas_widget import CanvasWidget, DrawMode, Tool
 from ltd.widgets.label_image_list import LabelImageList
 from ltd.widgets.loading_dialog import loading_dialog
+from ltd.widgets.elided_label import ElidedLabel
 from ltd.widgets.module_selector import ModuleSelector
 from ltd.workers.detection_worker import DetectionWorker
 
@@ -205,7 +206,7 @@ class LabelTab(QWidget):
         self.detection_progress.setVisible(False)
         detection_layout.addWidget(self.detection_progress)
 
-        self.detection_status = QLabel('')
+        self.detection_status = ElidedLabel('')
         detection_layout.addWidget(self.detection_status)
 
         self.cancel_detection_btn = QPushButton('Cancel')

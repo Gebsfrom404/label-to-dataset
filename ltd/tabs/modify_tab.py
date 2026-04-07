@@ -19,6 +19,7 @@ from ltd.utils.image_utils import load_pixmap_preview
 from ltd.utils.mask_utils import mask_from_qimage
 from ltd.widgets.canvas_widget import CanvasWidget, DrawMode, Tool
 from ltd.widgets.image_list_widget import ImageListWidget
+from ltd.widgets.elided_label import ElidedLabel
 from ltd.widgets.loading_dialog import loading_dialog
 from ltd.widgets.module_selector import ModuleSelector
 from ltd.workers.modification_worker import ModificationWorker
@@ -208,7 +209,7 @@ class ModifyTab(QWidget):
         self.mod_progress.setVisible(False)
         mod_layout.addWidget(self.mod_progress)
 
-        self.mod_status = QLabel('')
+        self.mod_status = ElidedLabel('')
         mod_layout.addWidget(self.mod_status)
 
         self.cancel_btn = QPushButton('Cancel')
