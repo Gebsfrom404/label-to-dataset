@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from typing import overload
+
 from PySide6.QtCore import QSettings
 
 DEFAULT_SETTINGS = {
@@ -17,5 +21,25 @@ DEFAULT_SETTINGS = {
 }
 
 
-def get_settings() -> QSettings:
-    return QSettings('LabelToDataset', 'LabelToDataset')
+class TypedSettings(QSettings):
+    @overload
+    def value(self, key: str, defaultValue: bool, *, type: type[bool]) -> bool: ...  # pyright: ignore[reportOverlappingOverload]
+    @overload
+    def value(self, key: str, defaultValue: int, *, type: type[int]) -> int: ...
+    @overload
+    def value(self, key: str, defaultValue: float, *, type: type[float]) -> float: ...
+    @overload
+    def value(self, key: str, defaultValue: str, *, type: type[str]) -> str: ...
+    @overload
+    def value(self, key: str, defaultValue: object = ..., type: type | None = ...) -> object: ...
+
+    def value(self, key, defaultValue=None, type=None):  # type: ignore[override]
+        if type is not None:
+            return super().value(key, defaultValue, type=type)
+        if defaultValue is not None:
+            return super().value(key, defaultValue)
+        return super().value(key)
+
+
+def get_settings() -> TypedSettings:
+    return TypedSettings('LabelToDataset', 'LabelToDataset')
