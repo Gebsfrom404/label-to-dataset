@@ -406,7 +406,8 @@ class LabelTab(QWidget):
             colors = self._get_colors()
             self.canvas.display_labels(image.labels, colors)
             self._refresh_labels_list()
-            self.canvas.setFocus()
+            if not self.image_list.filter_input.hasFocus():
+                self.canvas.setFocus()
 
         QTimer.singleShot(0, lambda idx=index: self._preload_adjacent(idx))
 
