@@ -1149,6 +1149,7 @@ class CaptionTab(QWidget):
             self._cancel_fullres_loader()
             self._pixmap_cache.clear()
             self._clear_undo_stacks()
+            self._current_image_index = -1
             self.model.load_directory(directory)
 
             # Filter out mask files
