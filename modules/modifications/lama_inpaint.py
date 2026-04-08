@@ -161,7 +161,6 @@ class LamaInpaintModule(BaseModificationModule):
         self._model = model.to(device).eval()
 
     def run(self, image_path: Path, mask_path: Path, **kwargs) -> Path:
-        import torch
         self._ensure_model()
 
         from ltd.utils.file_utils import cv_imread
@@ -182,12 +181,6 @@ class LamaInpaintModule(BaseModificationModule):
             kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
             mask = cv2.dilate(mask, kernel, iterations=self._mask_grow)
 
-        # Prevent mask from touching border
-        mask[0:1, :] = 0
-        mask[-1:, :] = 0
-        mask[:, 0:1] = 0
-        mask[:, -1:] = 0
-
         # BGR -> RGB (big-lama was trained on RGB)
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
@@ -202,29 +195,17 @@ class LamaInpaintModule(BaseModificationModule):
             image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
             mask = cv2.resize(mask, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
 
-        # Prepare tensors
-        img_tensor = self._prepare_image(image)
-        mask_tensor = self._prepare_mask(mask)
-
-        with torch.inference_mode():
-            if self._is_jit:
-                inpainted = self._model(img_tensor, mask_tensor)
-            else:
-                masked_image = img_tensor * (1 - mask_tensor)
-                inp = torch.cat([masked_image, mask_tensor], dim=1)
-                inpainted = self._model(inp)
-                # Composite: keep original pixels outside mask
-                inpainted = img_tensor * (1 - mask_tensor) + inpainted * mask_tensor
-            result = inpainted[0].permute(1, 2, 0).detach().cpu().numpy()
-            result = np.clip(result * 255, 0, 255).astype(np.uint8)
-        del img_tensor, mask_tensor, inpainted
-
-        # Crop padding back to inference size
-        result = result[:image.shape[0], :image.shape[1]]
+        # Process each disconnected mask region as an independent crop
+        result = image.copy()
+        regions = self._find_mask_regions(mask)
+        for (x1, y1, x2, y2) in regions:
+            result = self._inpaint_region(
+                result, mask, x1, y1, x2, y2)
 
         # Upscale back to original resolution if we downscaled
         if short_side > max_side:
-            result = cv2.resize(result, (orig_w, orig_h), interpolation=cv2.INTER_LANCZOS4)
+            result = cv2.resize(result, (orig_w, orig_h),
+                                interpolation=cv2.INTER_LANCZOS4)
 
         # RGB -> BGR for cv2.imwrite
         result = cv2.cvtColor(result, cv2.COLOR_RGB2BGR)
@@ -236,6 +217,105 @@ class LamaInpaintModule(BaseModificationModule):
         from ltd.utils.file_utils import cv_imwrite
         cv_imwrite(output_path, result)
         return output_path
+
+    def _find_mask_regions(self, mask: np.ndarray, context: int = 128):
+        """Find bounding boxes of disconnected mask regions with context."""
+        h, w = mask.shape[:2]
+        binary = (mask > 127).astype(np.uint8)
+        num_labels, labels = cv2.connectedComponents(binary)
+
+        boxes = []
+        for label_id in range(1, num_labels):
+            ys, xs = np.where(labels == label_id)
+            y1 = max(0, ys.min() - context)
+            y2 = min(h, ys.max() + 1 + context)
+            x1 = max(0, xs.min() - context)
+            x2 = min(w, xs.max() + 1 + context)
+            boxes.append((x1, y1, x2, y2))
+
+        # Merge overlapping boxes
+        merged = True
+        while merged:
+            merged = False
+            new_boxes = []
+            used = set()
+            for i, a in enumerate(boxes):
+                if i in used:
+                    continue
+                ax1, ay1, ax2, ay2 = a
+                for j, b in enumerate(boxes):
+                    if j <= i or j in used:
+                        continue
+                    bx1, by1, bx2, by2 = b
+                    if ax1 <= bx2 and ax2 >= bx1 and ay1 <= by2 and ay2 >= by1:
+                        ax1 = min(ax1, bx1)
+                        ay1 = min(ay1, by1)
+                        ax2 = max(ax2, bx2)
+                        ay2 = max(ay2, by2)
+                        used.add(j)
+                        merged = True
+                new_boxes.append((ax1, ay1, ax2, ay2))
+                used.add(i)
+            boxes = new_boxes
+
+        return boxes if boxes else [(0, 0, w, h)]
+
+    def _inpaint_region(self, image, mask, x1, y1, x2, y2):
+        """Inpaint a single cropped region, padding edges that touch borders."""
+        import torch
+        img_h, img_w = image.shape[:2]
+        crop_img = image[y1:y2, x1:x2].copy()
+        crop_mask = mask[y1:y2, x1:x2].copy()
+
+        # Pad sides that touch the image border so LaMa treats them as interior
+        pad_size = 128
+        pad_top = pad_size if y1 == 0 else 0
+        pad_bot = pad_size if y2 == img_h else 0
+        pad_left = pad_size if x1 == 0 else 0
+        pad_right = pad_size if x2 == img_w else 0
+
+        if any((pad_top, pad_bot, pad_left, pad_right)):
+            # Pre-fill masked pixels with local colors so reflect padding
+            # doesn't mirror artifacts into the padded area
+            if crop_mask.any():
+                crop_img = cv2.inpaint(
+                    crop_img, (crop_mask > 127).astype(np.uint8),
+                    inpaintRadius=3, flags=cv2.INPAINT_TELEA)
+            crop_img = cv2.copyMakeBorder(
+                crop_img, pad_top, pad_bot, pad_left, pad_right,
+                cv2.BORDER_REFLECT_101)
+            crop_mask = cv2.copyMakeBorder(
+                crop_mask, pad_top, pad_bot, pad_left, pad_right,
+                cv2.BORDER_CONSTANT, value=0)
+
+        # Run LaMa on this crop
+        img_tensor = self._prepare_image(crop_img)
+        mask_tensor = self._prepare_mask(crop_mask)
+
+        with torch.inference_mode():
+            if self._is_jit:
+                inpainted = self._model(img_tensor, mask_tensor)
+            else:
+                masked_image = img_tensor * (1 - mask_tensor)
+                inp = torch.cat([masked_image, mask_tensor], dim=1)
+                inpainted = self._model(inp)
+                inpainted = (img_tensor * (1 - mask_tensor)
+                             + inpainted * mask_tensor)
+            patch = inpainted[0].permute(1, 2, 0).detach().cpu().numpy()
+            patch = np.clip(patch * 255, 0, 255).astype(np.uint8)
+        del img_tensor, mask_tensor, inpainted
+
+        # Remove modulo padding (from _pad_to_modulo)
+        patch = patch[:crop_img.shape[0], :crop_img.shape[1]]
+
+        # Remove edge padding
+        ph, pw = patch.shape[:2]
+        patch = patch[pad_top:ph - pad_bot if pad_bot else ph,
+                      pad_left:pw - pad_right if pad_right else pw]
+
+        # Paste back into the result image
+        image[y1:y2, x1:x2] = patch
+        return image
 
     def _prepare_image(self, image: np.ndarray):
         import torch
