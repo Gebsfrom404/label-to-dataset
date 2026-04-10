@@ -95,6 +95,12 @@ class CanvasWidget(QGraphicsView):
         self._drag_start: QPointF | None = None
         self._drag_orig_points: list[QPointF] = []  # original points at drag start
 
+        # Resize handles (bounding box around polygons)
+        self._resize_handles: list[QGraphicsRectItem] = []
+        self._resize_border: QGraphicsRectItem | None = None
+        self._dragging_resize: int = -1  # index of resize handle, -1 = none
+        self._resize_anchor: QPointF | None = None  # opposite corner for scaling
+
         # Throttle mask overlay updates during drawing
         self._draw_stroke_count = 0
 
@@ -178,6 +184,10 @@ class CanvasWidget(QGraphicsView):
         self._brush_cursor_outer = None
         self._label_items.clear()
         self._edit_handles.clear()
+        self._resize_handles.clear()
+        self._resize_border = None
+        self._dragging_resize = -1
+        self._resize_anchor = None
         self._polygon_points.clear()
         self._polygon_markers.clear()
         self._polygon_lines.clear()
@@ -222,6 +232,10 @@ class CanvasWidget(QGraphicsView):
         self._brush_cursor = None
         self._label_items.clear()
         self._edit_handles.clear()
+        self._resize_handles.clear()
+        self._resize_border = None
+        self._dragging_resize = -1
+        self._resize_anchor = None
         self._mask_buffer = None
         self.scene_.clear()
 
@@ -536,7 +550,8 @@ class CanvasWidget(QGraphicsView):
             return
 
         if self._current_tool == Tool.POINTER and (
-                self._dragging_handle >= 0 or self._dragging_label):
+                self._dragging_handle >= 0 or self._dragging_label
+                or self._dragging_resize >= 0):
             self._handle_pointer_drag(scene_pos)
         elif self._drawing and self._current_tool in _BRUSH_TOOLS:
             self._continue_drawing(scene_pos,
@@ -562,7 +577,8 @@ class CanvasWidget(QGraphicsView):
 
         if event.button() == Qt.MouseButton.LeftButton:
             if self._current_tool == Tool.POINTER and (
-                    self._dragging_handle >= 0 or self._dragging_label):
+                    self._dragging_handle >= 0 or self._dragging_label
+                    or self._dragging_resize >= 0):
                 self._finish_pointer_drag()
             elif self._current_tool == Tool.BBOX and self._drawing:
                 scene_pos = self.mapToScene(event.position().toPoint())
@@ -646,13 +662,24 @@ class CanvasWidget(QGraphicsView):
     # --- Edit handles for pointer tool ---
 
     def _remove_edit_handles(self):
-        """Remove all edit handle markers from the scene."""
+        """Remove all edit handle markers and resize handles from the scene."""
         for h in self._edit_handles:
             if h.scene() is not None:
                 self.scene_.removeItem(h)
         self._edit_handles.clear()
         self._dragging_handle = -1
         self._dragging_label = False
+        # Remove resize handles
+        for h in self._resize_handles:
+            if h.scene() is not None:
+                self.scene_.removeItem(h)
+        self._resize_handles.clear()
+        if self._resize_border is not None:
+            if self._resize_border.scene() is not None:
+                self.scene_.removeItem(self._resize_border)
+            self._resize_border = None
+        self._dragging_resize = -1
+        self._resize_anchor = None
 
     def _show_edit_handles(self, label_index: int):
         """Show draggable point handles on the selected label."""
@@ -673,6 +700,9 @@ class CanvasWidget(QGraphicsView):
                 QBrush(color))
             marker.setZValue(20)
             self._edit_handles.append(marker)
+        # For polygons, add bounding-box resize handles
+        if isinstance(item, QGraphicsPolygonItem) and len(points) >= 3:
+            self._show_resize_handles(points, color)
 
     def _label_item_by_index(self, label_index: int) -> QGraphicsItem | None:
         """Find the QGraphicsItem for a given label index."""
@@ -704,7 +734,19 @@ class CanvasWidget(QGraphicsView):
 
     def _handle_pointer_press(self, pos: QPointF):
         """Handle mouse press in pointer mode — start drag or select."""
-        # First check if clicking on an edit handle
+        # First check resize handles (bounding box around polygon)
+        if self._resize_handles:
+            ri = self._hit_test_resize_handle(pos)
+            if ri >= 0:
+                self._dragging_resize = ri
+                self._drag_start = pos
+                self._drag_orig_points = self._get_label_scene_points(
+                    self._selected_label_index)
+                self._resize_anchor = self._resize_anchor_for_handle(
+                    ri, self._drag_orig_points)
+                return
+
+        # Check vertex edit handles
         if self._edit_handles:
             hi = self._hit_test_handle(pos)
             if hi >= 0:
@@ -749,7 +791,10 @@ class CanvasWidget(QGraphicsView):
         if item is None:
             return
 
-        if self._dragging_handle >= 0:
+        if self._dragging_resize >= 0:
+            # Dragging a resize handle — scale polygon
+            self._apply_resize_drag(pos)
+        elif self._dragging_handle >= 0:
             # Dragging a single point
             hi = self._dragging_handle
             new_points = list(self._drag_orig_points)
@@ -770,9 +815,12 @@ class CanvasWidget(QGraphicsView):
     def _finish_pointer_drag(self):
         """Finalize drag — emit label_modified with updated label."""
         idx = self._selected_label_index
-        was_dragging = self._dragging_handle >= 0 or self._dragging_label
+        was_dragging = (self._dragging_handle >= 0 or self._dragging_label
+                        or self._dragging_resize >= 0)
         self._dragging_handle = -1
         self._dragging_label = False
+        self._dragging_resize = -1
+        self._resize_anchor = None
         self._drag_start = None
         self._drag_orig_points = []
 
@@ -835,6 +883,155 @@ class CanvasWidget(QGraphicsView):
             if i < len(self._edit_handles):
                 self._edit_handles[i].setRect(
                     pt.x() - 4, pt.y() - 4, 8, 8)
+        # Also update resize handles if present
+        if self._resize_handles:
+            self._update_resize_handle_positions(points)
+
+    # --- Polygon resize handles ---
+
+    _HANDLE_SZ = 7  # half-size of square resize handles
+
+    def _show_resize_handles(self, points: list[QPointF], color: QColor):
+        """Show a bounding box with 8 resize handles around polygon points.
+
+        Handle order: TL, T, TR, R, BR, B, BL, L (clockwise from top-left).
+        """
+        xs = [p.x() for p in points]
+        ys = [p.y() for p in points]
+        x0, y0, x1, y1 = min(xs), min(ys), max(xs), max(ys)
+        mx, my = (x0 + x1) / 2, (y0 + y1) / 2
+
+        # Dashed border
+        pen = QPen(QColor(255, 255, 255, 160), 1, Qt.PenStyle.DashLine)
+        self._resize_border = self.scene_.addRect(
+            QRectF(x0, y0, x1 - x0, y1 - y0), pen)
+        self._resize_border.setZValue(19)
+
+        # 8 handle positions: TL, T, TR, R, BR, B, BL, L
+        positions = [
+            QPointF(x0, y0), QPointF(mx, y0), QPointF(x1, y0),
+            QPointF(x1, my),
+            QPointF(x1, y1), QPointF(mx, y1), QPointF(x0, y1),
+            QPointF(x0, my),
+        ]
+        sz = self._HANDLE_SZ
+        handle_pen = QPen(Qt.GlobalColor.white, 1)
+        handle_brush = QBrush(QColor(color.red(), color.green(),
+                                     color.blue(), 180))
+        for pt in positions:
+            h = self.scene_.addRect(
+                pt.x() - sz / 2, pt.y() - sz / 2, sz, sz,
+                handle_pen, handle_brush)
+            h.setZValue(21)
+            self._resize_handles.append(h)
+
+    def _update_resize_handle_positions(self, points: list[QPointF]):
+        """Reposition resize handles and border to match current points."""
+        if len(self._resize_handles) != 8:
+            return
+        xs = [p.x() for p in points]
+        ys = [p.y() for p in points]
+        x0, y0, x1, y1 = min(xs), min(ys), max(xs), max(ys)
+        mx, my = (x0 + x1) / 2, (y0 + y1) / 2
+        positions = [
+            QPointF(x0, y0), QPointF(mx, y0), QPointF(x1, y0),
+            QPointF(x1, my),
+            QPointF(x1, y1), QPointF(mx, y1), QPointF(x0, y1),
+            QPointF(x0, my),
+        ]
+        sz = self._HANDLE_SZ
+        for i, pt in enumerate(positions):
+            self._resize_handles[i].setRect(
+                pt.x() - sz / 2, pt.y() - sz / 2, sz, sz)
+        if self._resize_border is not None:
+            self._resize_border.setRect(
+                QRectF(x0, y0, x1 - x0, y1 - y0))
+
+    def _hit_test_resize_handle(self, pos: QPointF) -> int:
+        """Return index of resize handle near pos, or -1."""
+        for i, h in enumerate(self._resize_handles):
+            center = h.rect().center()
+            if hypot(pos.x() - center.x(), pos.y() - center.y()) < 10:
+                return i
+        return -1
+
+    def _resize_anchor_for_handle(self, handle_index: int,
+                                  points: list[QPointF]) -> QPointF:
+        """Return the anchor point opposite to the given resize handle.
+
+        The polygon scales around this fixed point.
+        """
+        xs = [p.x() for p in points]
+        ys = [p.y() for p in points]
+        x0, y0, x1, y1 = min(xs), min(ys), max(xs), max(ys)
+        mx, my = (x0 + x1) / 2, (y0 + y1) / 2
+        # Opposite corners/edges for each of the 8 handles
+        # TL→BR, T→B, TR→BL, R→L, BR→TL, B→T, BL→TR, L→R
+        anchors = [
+            QPointF(x1, y1), QPointF(mx, y1), QPointF(x0, y1),
+            QPointF(x0, my),
+            QPointF(x0, y0), QPointF(mx, y0), QPointF(x1, y0),
+            QPointF(x1, my),
+        ]
+        return anchors[handle_index]
+
+    def _apply_resize_drag(self, pos: QPointF):
+        """Scale polygon points based on resize handle drag."""
+        if (self._resize_anchor is None or self._drag_start is None
+                or not self._drag_orig_points):
+            return
+        idx = self._selected_label_index
+        item = self._label_item_by_index(idx)
+        if item is None:
+            return
+
+        anchor = self._resize_anchor
+        hi = self._dragging_resize
+        clamped = self._clamp_to_image(pos)
+
+        # Compute original extent from anchor to drag start handle position
+        orig_points = self._drag_orig_points
+        xs = [p.x() for p in orig_points]
+        ys = [p.y() for p in orig_points]
+        x0, y0, x1, y1 = min(xs), min(ys), max(xs), max(ys)
+        mx, my = (x0 + x1) / 2, (y0 + y1) / 2
+        handle_positions = [
+            QPointF(x0, y0), QPointF(mx, y0), QPointF(x1, y0),
+            QPointF(x1, my),
+            QPointF(x1, y1), QPointF(mx, y1), QPointF(x0, y1),
+            QPointF(x0, my),
+        ]
+        orig_handle = handle_positions[hi]
+
+        # Scale factors per axis
+        ox = orig_handle.x() - anchor.x()
+        oy = orig_handle.y() - anchor.y()
+        nx = clamped.x() - anchor.x()
+        ny = clamped.y() - anchor.y()
+
+        # Edge handles: lock one axis
+        # T(1), B(5) → only scale Y; L(7), R(3) → only scale X
+        lock_x = hi in (1, 5)
+        lock_y = hi in (3, 7)
+
+        sx = (nx / ox) if abs(ox) > 1 else 1.0
+        sy = (ny / oy) if abs(oy) > 1 else 1.0
+        if lock_x:
+            sx = 1.0
+        if lock_y:
+            sy = 1.0
+        # Prevent flipping
+        sx = max(sx, 0.02)
+        sy = max(sy, 0.02)
+
+        new_points = []
+        for pt in orig_points:
+            px = anchor.x() + (pt.x() - anchor.x()) * sx
+            py = anchor.y() + (pt.y() - anchor.y()) * sy
+            new_points.append(self._clamp_to_image(QPointF(px, py)))
+
+        self._apply_points_to_item(item, new_points)
+        self._update_handle_positions(new_points)
 
     # --- BBox tool ---
 

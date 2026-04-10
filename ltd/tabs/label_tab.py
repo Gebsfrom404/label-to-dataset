@@ -6,7 +6,7 @@ from collections import OrderedDict
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QShortcut, QKeySequence
+from PySide6.QtGui import QColor, QCursor, QShortcut, QKeySequence
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox,
                                QFileDialog, QGroupBox, QHBoxLayout, QLabel,
                                QListWidget, QListWidgetItem, QMessageBox,
@@ -57,6 +57,9 @@ class LabelTab(QWidget):
         # key = image index, value = list of label list snapshots
         self._undo_stacks: dict[int, list[list[Label]]] = {}
         self._max_undo = 50
+
+        # Label clipboard for copy/paste
+        self._copied_labels: list[Label] = []
 
         # Discover detection modules
         self._detection_modules = discover_modules(
@@ -170,6 +173,8 @@ class LabelTab(QWidget):
         labels_group = QGroupBox('Labels (current image)')
         labels_layout = QVBoxLayout(labels_group)
         self.labels_list = QListWidget()
+        self.labels_list.setSelectionMode(
+            QListWidget.SelectionMode.ExtendedSelection)
         labels_layout.addWidget(self.labels_list)
 
         labels_btn_layout = QHBoxLayout()
@@ -284,6 +289,10 @@ class LabelTab(QWidget):
             self._delete_selected_label)
         QShortcut(QKeySequence('Ctrl+Z'), self).activated.connect(
             self._undo)
+        QShortcut(QKeySequence('Ctrl+C'), self).activated.connect(
+            self._copy_labels)
+        QShortcut(QKeySequence('Ctrl+V'), self).activated.connect(
+            self._paste_labels)
 
     def _install_space_filter(self):
         """Install event filter on all child widgets to capture spacebar."""
@@ -801,6 +810,122 @@ class LabelTab(QWidget):
         self.canvas.display_labels(image.labels, colors)
         self._refresh_labels_list()
         self._save_current_labels()
+
+    # --- Copy / Paste labels ---
+
+    def _copy_labels(self):
+        """Copy labels. What gets copied depends on focus:
+
+        - Image list focused: copy ALL labels on the current image.
+        - Labels list / canvas: copy selected labels only.
+        """
+        image = self.model.get_image(self._current_image_index)
+        if image is None or not image.labels:
+            return
+
+        # If the image list (or its children) has focus, copy all labels
+        focus = QApplication.focusWidget()
+        if focus is not None:
+            w = focus
+            while w is not None:
+                if w is self.image_list:
+                    self._copied_labels = copy.deepcopy(image.labels)
+                    return
+                w = w.parentWidget()
+
+        # Otherwise copy selected labels from labels list / canvas
+        selected_rows = sorted(
+            idx.row() for idx in self.labels_list.selectedIndexes())
+        if not selected_rows:
+            ci = self.canvas._selected_label_index
+            if 0 <= ci < len(image.labels):
+                selected_rows = [ci]
+        if not selected_rows:
+            return
+        self._copied_labels = [
+            copy.deepcopy(image.labels[r])
+            for r in selected_rows if 0 <= r < len(image.labels)]
+
+    def _paste_labels(self):
+        """Paste copied labels. Behaviour depends on which widget has focus:
+
+        - Image list focused: labels keep their original normalised coords
+          (ideal for same-size image variants).
+        - Canvas focused: labels are repositioned so the group's top-left
+          lands at the current cursor position on canvas.
+        """
+        if not self._copied_labels:
+            return
+        image = self.model.get_image(self._current_image_index)
+        if image is None:
+            return
+
+        labels = copy.deepcopy(self._copied_labels)
+
+        # Decide paste mode based on focus
+        focus_widget = QApplication.focusWidget()
+        paste_at_cursor = False
+        if focus_widget is not None:
+            # Walk up parent chain to see if focus is inside the canvas
+            w = focus_widget
+            while w is not None:
+                if w is self.canvas:
+                    paste_at_cursor = True
+                    break
+                w = w.parentWidget()
+
+        if paste_at_cursor and self.canvas._image_width > 0:
+            # Get cursor position in normalised image coordinates
+            view_pos = self.canvas.mapFromGlobal(QCursor.pos())
+            scene_pos = self.canvas.mapToScene(view_pos)
+            # Only use cursor placement if cursor is actually over the image;
+            # otherwise fall back to same-coordinates paste (canvas may have
+            # focus while the mouse hovers over the image list).
+            if not self.canvas._is_in_image(scene_pos):
+                paste_at_cursor = False
+
+        if paste_at_cursor and self.canvas._image_width > 0:
+            view_pos = self.canvas.mapFromGlobal(QCursor.pos())
+            scene_pos = self.canvas.mapToScene(view_pos)
+            cursor_nx = scene_pos.x() / self.canvas._image_width
+            cursor_ny = scene_pos.y() / self.canvas._image_height
+
+            # Find bounding box top-left of copied labels group
+            min_x, min_y = 1.0, 1.0
+            for lbl in labels:
+                if lbl.has_bbox:
+                    cx, cy, w, h = lbl.bbox
+                    min_x = min(min_x, cx - w / 2)
+                    min_y = min(min_y, cy - h / 2)
+                if lbl.has_polygon:
+                    for px, py in lbl.polygon:
+                        min_x = min(min_x, px)
+                        min_y = min(min_y, py)
+
+            dx = cursor_nx - min_x
+            dy = cursor_ny - min_y
+            labels = self._offset_labels(labels, dx, dy)
+
+        self._push_undo()
+        image.labels.extend(labels)
+        colors = self._get_colors()
+        self.canvas.display_labels(image.labels, colors)
+        self._refresh_labels_list()
+        self._save_current_labels()
+        # Force canvas repaint (display_labels alone may not trigger
+        # a viewport update when called outside the normal image-change flow)
+        self.canvas.viewport().update()
+
+    @staticmethod
+    def _offset_labels(labels: list[Label], dx: float, dy: float) -> list[Label]:
+        """Shift all labels by (dx, dy) in normalised coords, clamping to 0-1."""
+        for lbl in labels:
+            if lbl.has_bbox:
+                cx, cy, w, h = lbl.bbox
+                lbl.bbox = (cx + dx, cy + dy, w, h)
+            if lbl.has_polygon:
+                lbl.polygon = [(px + dx, py + dy) for px, py in lbl.polygon]
+        return labels
 
     # --- Auto detection ---
 
