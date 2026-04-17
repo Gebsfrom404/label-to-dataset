@@ -52,6 +52,7 @@ class ImageFilterProxyModel(QSortFilterProxyModel):
     Syntax (space-separated terms are ANDed):
       - plain text     : substring match on filename or any tag
       - tag:pattern    : exact tag match (wildcards * ? for glob)
+      - r:pattern      : regex match on filename or any tag
       - name:pattern   : filename match (substring, or glob with *)
       - path:pattern   : full path match
       - tags:>N        : tag count comparison (=, !=, <, >, <=, >=)
@@ -63,7 +64,7 @@ class ImageFilterProxyModel(QSortFilterProxyModel):
 
     Examples:
       tag:1girl and not (tag:1boy or tag:3boys)
-      (tag:cat or tag:dog) and not tag:blurry
+      sun and r:"shadow$" and not tag:dark
     """
 
     _OPS = {
@@ -123,6 +124,11 @@ class ImageFilterProxyModel(QSortFilterProxyModel):
             key_lower = key.lower()
             if key_lower == 'tag':
                 return ('tag', value)
+            elif key_lower == 'r':
+                try:
+                    return ('regex', re.compile(value, re.IGNORECASE))
+                except re.error:
+                    return ('text', token)
             elif key_lower == 'name':
                 return ('name', value)
             elif key_lower == 'path':
@@ -237,6 +243,10 @@ class ImageFilterProxyModel(QSortFilterProxyModel):
             if '*' in p or '?' in p:
                 return any(fnmatchcase(t.lower(), p) for t in image.tags)
             return any(t.strip().lower() == p for t in image.tags)
+        elif kind == 'regex':
+            rx = term[1]
+            return (rx.search(image.display_name) is not None
+                    or any(rx.search(t) is not None for t in image.tags))
         elif kind == 'name':
             return self._wild(term[1], image.display_name)
         elif kind == 'path':
@@ -303,7 +313,7 @@ class CaptionImageList(QWidget):
         # Filter bar
         self.filter_input = QLineEdit()
         self.filter_input.setPlaceholderText(
-            'Filter: tag:x, name:*, tags:>N, or, not/-, (groups)')
+            'Filter: tag:x, r:regex, name:*, tags:>N, or, not/-, (groups)')
         self.filter_input.setClearButtonEnabled(True)
         layout.addWidget(self.filter_input)
 

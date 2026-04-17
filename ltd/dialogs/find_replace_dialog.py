@@ -26,6 +26,7 @@ class FindReplaceDialog(QDialog):
 
         self.scope_combo = QComboBox()
         self.scope_combo.addItems(['All images', 'Selected images'])
+        self.scope_combo.setCurrentIndex(1)
         form.addRow('Scope:', self.scope_combo)
 
         self.match_whole = QCheckBox('Whole tags only')

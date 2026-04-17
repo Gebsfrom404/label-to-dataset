@@ -9,8 +9,9 @@ from pathlib import Path
 import numpy as np
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QKeySequence, QPainter, QPixmap, QShortcut
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox,
-                               QDialog, QDoubleSpinBox,
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox,
+                               QComboBox, QDialog, QDialogButtonBox,
+                               QDoubleSpinBox,
                                QGraphicsScene, QGraphicsView,
                                QGroupBox, QHBoxLayout, QLabel, QLineEdit,
                                QListWidget, QListWidgetItem, QFileDialog,
@@ -293,18 +294,21 @@ class EditableTagsList(QListWidget):
 
     def _tag_matches(self, tag_text: str) -> bool:
         tag_lower = tag_text.strip().lower()
-        for kind, value in self._highlight_patterns:
-            v = value.lower()
+        for pat in self._highlight_patterns:
+            kind = pat[0]
             if kind == 'tag':
+                v = pat[1].lower()
                 if '*' in v or '?' in v:
                     if fnmatchcase(tag_lower, v):
                         return True
                 else:
-                    # Exact tag match (same as filter proxy)
                     if tag_lower == v:
                         return True
+            elif kind == 'regex':
+                if pat[1].search(tag_text.strip()) is not None:
+                    return True
             elif kind == 'text':
-                if v in tag_lower:
+                if pat[1].lower() in tag_lower:
                     return True
         return False
 
@@ -1311,8 +1315,14 @@ class CaptionTab(QWidget):
                 token = token[1:]
             if ':' in token:
                 key, _, value = token.partition(':')
-                if key.lower() == 'tag' and value:
+                kl = key.lower()
+                if kl == 'tag' and value:
                     patterns.append(('tag', value))
+                elif kl == 'r' and value:
+                    try:
+                        patterns.append(('regex', re.compile(value, re.IGNORECASE)))
+                    except re.error:
+                        pass
             else:
                 patterns.append(('text', token))
         self.tags_list.set_highlight_patterns(patterns)
@@ -2105,16 +2115,40 @@ class CaptionTab(QWidget):
             'CSV Files (*.csv)')
         if not path:
             return
-        from PySide6.QtWidgets import QInputDialog
-        user_input, ok = QInputDialog.getText(
-            self, 'Tags to Restore',
-            'Enter comma-separated tag names to restore from snapshot:')
-        if not ok or not user_input.strip():
+        dlg = QDialog(self)
+        dlg.setWindowTitle('Tags to Restore')
+        dlg_layout = QVBoxLayout(dlg)
+        dlg_layout.addWidget(QLabel(
+            'Enter comma-separated tag names (or a regex pattern):'
+        ))
+        input_edit = QLineEdit()
+        dlg_layout.addWidget(input_edit)
+        use_regex_cb = QCheckBox('Use regex')
+        dlg_layout.addWidget(use_regex_cb)
+        dlg_buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel)
+        dlg_buttons.accepted.connect(dlg.accept)
+        dlg_buttons.rejected.connect(dlg.reject)
+        dlg_layout.addWidget(dlg_buttons)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        requested_tags = {t.strip() for t in user_input.split(',')
-                         if t.strip()}
-        if not requested_tags:
+        user_input = input_edit.text().strip()
+        if not user_input:
             return
+        is_regex = use_regex_cb.isChecked()
+
+        if is_regex:
+            try:
+                tag_rx = re.compile(user_input, re.IGNORECASE)
+            except re.error as e:
+                QMessageBox.warning(self, 'Error', f'Invalid regex: {e}')
+                return
+        else:
+            requested_tags = {t.strip() for t in user_input.split(',')
+                              if t.strip()}
+            if not requested_tags:
+                return
 
         sep = self._get_separator()
         # Parse snapshot
@@ -2142,9 +2176,14 @@ class CaptionTab(QWidget):
         for i, image in enumerate(self.model.images):
             if image.filename in snapshot:
                 snapshot_tags = snapshot[image.filename]
-                tags_to_add = [t for t in snapshot_tags
-                               if t in requested_tags
-                               and t not in image.tags]
+                if is_regex:
+                    tags_to_add = [t for t in snapshot_tags
+                                   if tag_rx.search(t)
+                                   and t not in image.tags]
+                else:
+                    tags_to_add = [t for t in snapshot_tags
+                                   if t in requested_tags
+                                   and t not in image.tags]
                 if tags_to_add:
                     self._push_undo(i, list(image.tags), bid)
                     image.tags.extend(tags_to_add)
