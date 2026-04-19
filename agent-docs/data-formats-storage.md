@@ -108,3 +108,12 @@ Per-image undo/redo stacks: `_undo_stacks[image_index] = [tag_list_snapshot, ...
 - `_skip_snapshot` flag prevents double-pushing when programmatically setting tags
 - Ctrl+Z / Ctrl+Y (or Ctrl+Shift+Z), max 50 undo levels per image
 - Stacks cleared on directory load
+
+## Mask History (Modify Tab)
+
+Per-image mask edit history: `_image_histories[id(ImageItem)] = (history_list, history_pos)`
+- Keyed by `id(ImageItem)` (not row index) so history follows the object through row shifts (insert/delete/split) and doesn't leak across folder loads
+- `_current_image_id` tracks the currently loaded image's id so `_on_image_changed` saves the outgoing history under the right key even if rows shifted
+- `_load_directory` / `load_from_label_tab` clear `_image_histories` and reset `_current_image_id` (old ImageItems are GC'd, so their ids could be reused)
+- `_delete_current_image` pops by `id(image)` and sets `_current_image_id = None` to prevent re-saving history for a deleted image
+- Entries capture full state (mask QImage, pixmap, paths, dims); max 50 entries

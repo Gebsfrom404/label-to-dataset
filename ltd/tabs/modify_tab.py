@@ -42,11 +42,13 @@ class ModifyTab(QWidget):
         super().__init__(parent)
         self.model = ImageListModel()
         self._current_image_index = -1
+        self._current_image_id: int | None = None
         self._worker: ModificationWorker | None = None
         self._class_colors: list[str] = list(DEFAULT_COLORS)
         self._pixmap_cache: OrderedDict[str, object] = OrderedDict()
         self._active_tool = None  # Track which tool is active (Tool enum or str)
-        # Mask edit history per image: keyed by image index.
+        # Mask edit history per image, keyed by id(ImageItem) so entries
+        # follow the object through row shifts, inserts, and folder reloads.
         # Each value is (history_list, history_pos).
         # History entry dict keys:
         #   name: str, mask: QImage, pixmap: QPixmap,
@@ -316,8 +318,10 @@ class ModifyTab(QWidget):
         except OSError:
             pass
 
-        # Clean up history for this image
-        self._image_histories.pop(row, None)
+        # Clean up history for this image (by id so row shifts don't corrupt)
+        self._image_histories.pop(id(image), None)
+        # Prevent _on_image_changed from re-saving history for the deleted image
+        self._current_image_id = None
 
         self.model.remove_rows([row])
         if self.model.rowCount() > 0:
@@ -362,6 +366,12 @@ class ModifyTab(QWidget):
         # Delete image
         sc = QShortcut(QKeySequence('Ctrl+Delete'), self)
         sc.activated.connect(self._delete_current_image)
+
+        # Save modified images (Ctrl+S) / in-place (Ctrl+Shift+S)
+        sc = QShortcut(QKeySequence('Ctrl+S'), self)
+        sc.activated.connect(self._save_modified)
+        sc = QShortcut(QKeySequence('Ctrl+Shift+S'), self)
+        sc.activated.connect(self._save_modified_in_place)
 
     def _install_space_filter(self):
         """Install event filter on all child widgets to capture spacebar."""
@@ -537,6 +547,8 @@ class ModifyTab(QWidget):
                            colors: list[str] | None = None):
         """Load images with masks from the label tab."""
         self._pixmap_cache.clear()
+        self._image_histories.clear()
+        self._current_image_id = None
         if colors:
             self._class_colors = colors
         self.model.load_items(items)
@@ -549,6 +561,8 @@ class ModifyTab(QWidget):
 
         with loading_dialog('Loading images...', self):
             self._pixmap_cache.clear()
+            self._image_histories.clear()
+            self._current_image_id = None
             self.model.load_directory(directory)
 
             for image in self.model.images:
@@ -592,15 +606,17 @@ class ModifyTab(QWidget):
         self._history_record(action_name)
 
     def _on_image_changed(self, index: int):
-        # Save current image's history before switching
-        if self._current_image_index >= 0 and self._mask_history:
-            self._image_histories[self._current_image_index] = (
+        # Save previous image's history before switching (keyed by id)
+        if self._current_image_id is not None and self._mask_history:
+            self._image_histories[self._current_image_id] = (
                 list(self._mask_history), self._history_pos)
 
         self._current_image_index = index
         image = self.model.get_image(index)
         if image is None:
+            self._current_image_id = None
             return
+        self._current_image_id = id(image)
 
         # Disable crop/split on image change — switch to Hand
         if self._active_tool in (_TOOL_CROP, _TOOL_SPLIT_V, _TOOL_SPLIT_H):
@@ -631,9 +647,10 @@ class ModifyTab(QWidget):
         if image.labels:
             self.canvas.display_labels(image.labels, self._class_colors)
 
-        # Restore or initialize history for this image
-        if index in self._image_histories:
-            saved_history, saved_pos = self._image_histories[index]
+        # Restore or initialize history for this image (keyed by id)
+        key = id(image)
+        if key in self._image_histories:
+            saved_history, saved_pos = self._image_histories[key]
             self._mask_history = list(saved_history)
             self._history_pos = saved_pos
             self._sync_history_list()
@@ -1184,16 +1201,15 @@ class ModifyTab(QWidget):
             QMessageBox.StandardButton.No)
         if reply != QMessageBox.StandardButton.Yes:
             return
+        cur_image = self.model.get_image(self._current_image_index)
         for image in modified:
             self._pixmap_cache.pop(str(image.modified_path), None)
             self._pixmap_cache.pop(str(image.path), None)
             image.modified_path = None
-            idx = self.model.images.index(image)
-            self.model.invalidate_thumbnail(idx)
-            # Clear per-image histories for other images
-            if idx != self._current_image_index:
-                self._image_histories.pop(idx, None)
-        cur_image = self.model.get_image(self._current_image_index)
+            self.model.invalidate_thumbnail(self.model.images.index(image))
+            # Clear per-image histories for other images (by id)
+            if image is not cur_image:
+                self._image_histories.pop(id(image), None)
         if cur_image:
             self._reload_and_record(cur_image, 'Restore')
         self.mod_status.setText(f'Restored {len(modified)} original images')
