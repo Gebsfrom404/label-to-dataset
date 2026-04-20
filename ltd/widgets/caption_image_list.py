@@ -405,10 +405,20 @@ class CaptionImageList(QWidget):
         self.model.modelReset.connect(self._on_model_reset)
 
     def _on_model_reset(self):
-        self.list_view.selectionModel().currentChanged.connect(
-            self._on_current_changed)
-        self.list_view.selectionModel().selectionChanged.connect(
-            self._on_selection_changed)
+        # setModel() on the view creates a fresh selectionModel, so
+        # reconnect — but disconnect any prior binding first to avoid
+        # duplicate slot invocations on subsequent resets.
+        sm = self.list_view.selectionModel()
+        try:
+            sm.currentChanged.disconnect(self._on_current_changed)
+        except (RuntimeError, TypeError):
+            pass
+        try:
+            sm.selectionChanged.disconnect(self._on_selection_changed)
+        except (RuntimeError, TypeError):
+            pass
+        sm.currentChanged.connect(self._on_current_changed)
+        sm.selectionChanged.connect(self._on_selection_changed)
         self._update_counter()
 
     def _on_filter_changed(self, text: str):

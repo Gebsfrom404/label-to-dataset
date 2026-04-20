@@ -1210,10 +1210,16 @@ class CaptionTab(QWidget):
     # ------------------------------------------------------------------
 
     def _cancel_fullres_loader(self):
+        # Detach the in-flight loader without blocking the UI thread.
+        # The thread keeps running to completion; its result is dropped
+        # because the signal is disconnected, and _on_fullres_ready also
+        # guards against stale keys. Qt parent ownership keeps the
+        # QThread object alive until it finishes.
         if self._fullres_loader is not None:
-            self._fullres_loader.ready.disconnect()
-            self._fullres_loader.quit()
-            self._fullres_loader.wait(500)
+            try:
+                self._fullres_loader.ready.disconnect()
+            except (RuntimeError, TypeError):
+                pass
             self._fullres_loader = None
 
     def _on_fullres_ready(self, key: str, pixmap: QPixmap):
@@ -1277,8 +1283,11 @@ class CaptionTab(QWidget):
         self._update_token_count()
 
     def _preview_max_dim(self) -> int:
+        # Preview is a transient flash: full-res swaps in via
+        # _on_fullres_ready, and zoom uses that. Target ~half the
+        # viewport so libjpeg can DCT-scale large JPEGs cheaply.
         vp = self.image_viewer.viewport().size()
-        return max(vp.width(), vp.height(), 800) * 2
+        return max(vp.width(), vp.height(), 800) // 2
 
     def _preload_adjacent(self, index: int):
         if index != self._current_image_index:
