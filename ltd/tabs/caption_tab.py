@@ -597,6 +597,15 @@ class CaptionTab(QWidget):
         right = QWidget()
         right_layout = QVBoxLayout(right)
 
+        # Top row: shortcut info button (right-aligned)
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.addStretch(1)
+        from ltd.widgets.info_button import DynamicInfoButton
+        self.shortcuts_info = DynamicInfoButton(self._build_shortcuts_help)
+        header.addWidget(self.shortcuts_info)
+        right_layout.addLayout(header)
+
         self.right_tabs = QTabWidget()
 
         # ---- Tab: Image Tags ----
@@ -888,6 +897,28 @@ class CaptionTab(QWidget):
         self.save_captions_btn.clicked.connect(self._save_all_captions)
         self.export_captions_btn.clicked.connect(self._export_captions)
         self.reload_tags_btn.clicked.connect(self._reload_tags)
+
+    def _build_shortcuts_help(self) -> str:
+        from ltd.widgets.info_button import focus_in
+        from ltd.widgets.info_text import (CAPTION_SHORTCUTS_BULK,
+                                            CAPTION_SHORTCUTS_GLOBAL,
+                                            CAPTION_SHORTCUTS_INPUT,
+                                            CAPTION_SHORTCUTS_NAV,
+                                            CAPTION_SHORTCUTS_TAGS_LIST)
+        sections: list[str] = []
+        if focus_in(self.tag_input):
+            sections.append(CAPTION_SHORTCUTS_INPUT)
+        elif focus_in(self.tags_list):
+            sections.append(CAPTION_SHORTCUTS_TAGS_LIST)
+        elif focus_in(self.image_list):
+            sections.append(CAPTION_SHORTCUTS_NAV)
+        if not sections:
+            sections = [CAPTION_SHORTCUTS_TAGS_LIST,
+                        CAPTION_SHORTCUTS_INPUT,
+                        CAPTION_SHORTCUTS_NAV]
+        sections.append(CAPTION_SHORTCUTS_BULK)
+        sections.append(CAPTION_SHORTCUTS_GLOBAL)
+        return '<br>'.join(sections)
 
     def _setup_shortcuts(self):
         # Ctrl+S to save

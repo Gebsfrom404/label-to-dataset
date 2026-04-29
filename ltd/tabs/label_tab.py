@@ -145,6 +145,17 @@ class LabelTab(QWidget):
         right_widget = QWidget()
         right_layout = QVBoxLayout(right_widget)
 
+        # Top row: shortcut info button (right-aligned)
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.addStretch(1)
+        from ltd.widgets.info_button import DynamicInfoButton
+        from ltd.widgets.info_text import LABEL_SHORTCUTS_GLOBAL
+        self.shortcuts_info = DynamicInfoButton(
+            lambda: LABEL_SHORTCUTS_GLOBAL)
+        header.addWidget(self.shortcuts_info)
+        right_layout.addLayout(header)
+
         # Classes group
         classes_group = QGroupBox('Classes')
         classes_layout = QVBoxLayout(classes_group)

@@ -6,13 +6,15 @@ PySide6 desktop app. Entry: `main.py` → `ltd/app.py:create_application()` → 
 
 Warnings suppressed unless `LTD_ENVIRONMENT=development`.
 
-## 5-Tab Pipeline
+## Tabs
 
 ```
-Label → Modify → Caption → Train YOLO → Extras
+Label → Modify → Caption → Train YOLO → Manage Gen Images → Extras
 ```
 
 Each tab is a QWidget in `ltd/tabs/`. MainWindow holds them in a QTabWidget and mediates inter-tab communication via signals. Data passes through temp folders (`ltd/utils/file_utils.py`).
+
+`Manage Gen Images` is a standalone viewer (no inter-tab signals): browses AI-generated PNGs and shows their embedded generation metadata. Read-only.
 
 ## Key Components
 
@@ -30,9 +32,12 @@ Each tab is a QWidget in `ltd/tabs/`. MainWindow holds them in a QTabWidget and 
 | Settings widgets | `ltd/widgets/settings_widgets.py` | Auto-persisting QSettings-bound Qt widgets |
 | Toolbar | `ltd/widgets/toolbar_widget.py` | ComfyUI URL, theme toggle, font size |
 | Collapsible panel | `ltd/widgets/collapsible_panel.py` | Expandable/collapsible QFrame with header button (used by Extras tab) |
-| Loading dialog | `ltd/widgets/loading_dialog.py` | Frameless modal dialog with indeterminate progress bar |
+| Loading dialog | `ltd/widgets/loading_dialog.py` | Frameless modal dialog. Indeterminate by default; call `set_progress(current, total)` to switch to determinate. Shared by every tab that does mass loading (Label, Modify, Caption, Manage Gen Images) |
+| Info button | `ltd/widgets/info_button.py` | Small "ⓘ" QToolButton with rich-text tooltip. `InfoButton(html)` is static; `DynamicInfoButton(provider)` calls a `() → str` each time so content can change with focus. `focus_in(widget)` helper checks if a widget contains `QApplication.focusWidget()` |
+| Info text | `ltd/widgets/info_text.py` | All filter-grammar and shortcut help strings, one per filter widget / tab section (e.g. `LABEL_FILTER_HELP`, `CAPTION_SHORTCUTS_INPUT`, `GEN_SHORTCUTS_LIST`). Tabs build focus-aware help by concatenating sections that match `focus_in()` |
 | Label image list | `ltd/widgets/label_image_list.py` | Image list with filter proxy (by label count, class, filename) |
 | Caption image list | `ltd/widgets/caption_image_list.py` | Image list with filter, multi-select, context menu |
+| Gen image list | `ltd/widgets/gen_image_list.py` | Image list for Manage Gen Images tab; multi-select; context menu with Copy Prompt (Ctrl+C), Copy Image to..., Move Image to... (Ctrl+M); extends CaptionImageList's filter grammar with `WxH`, `size:`, `w:`, `h:`, `meta:`, `format:` terms |
 | Tag dictionary | `ltd/data/tag_dictionary.py` | CSV tag database loader (danbooru/e621), category colors, autocomplete search |
 | Tag completer popup | `ltd/widgets/tag_completer_popup.py` | Custom autocomplete popup with colored tags and post counts |
 | Workflow selector | `ltd/widgets/workflow_selector.py` | Dropdown for ComfyUI `.json` workflows with validation |

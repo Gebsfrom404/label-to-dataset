@@ -8,13 +8,15 @@ from pathlib import Path
 from PySide6.QtCore import (QFile, QModelIndex, QSize, QSortFilterProxyModel,
                              Qt, QUrl, Signal)
 from PySide6.QtGui import QDesktopServices, QKeySequence, QShortcut
-from PySide6.QtWidgets import (QApplication, QFileDialog,
+from PySide6.QtWidgets import (QApplication, QFileDialog, QHBoxLayout,
                                QLabel, QLineEdit, QListView, QMenu,
                                QMessageBox, QPushButton, QVBoxLayout,
                                QWidget)
 
 from ltd.data.image_item import ImageItem
 from ltd.data.image_list_model import ImageListModel
+from ltd.widgets.info_button import InfoButton
+from ltd.widgets.info_text import CAPTION_FILTER_HELP
 
 
 # ---------------------------------------------------------------------------
@@ -311,11 +313,15 @@ class CaptionImageList(QWidget):
         layout.addWidget(self.load_button)
 
         # Filter bar
+        filter_row = QHBoxLayout()
+        filter_row.setContentsMargins(0, 0, 0, 0)
         self.filter_input = QLineEdit()
         self.filter_input.setPlaceholderText(
             'Filter: tag:x, r:regex, name:*, tags:>N, or, not/-, (groups)')
         self.filter_input.setClearButtonEnabled(True)
-        layout.addWidget(self.filter_input)
+        filter_row.addWidget(self.filter_input, stretch=1)
+        filter_row.addWidget(InfoButton(CAPTION_FILTER_HELP))
+        layout.addLayout(filter_row)
 
         # List view with proxy model
         self.list_view = NavigableListView()

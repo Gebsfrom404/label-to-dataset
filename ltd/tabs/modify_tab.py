@@ -187,6 +187,17 @@ class ModifyTab(QWidget):
         right_widget = QWidget()
         right_layout = QVBoxLayout(right_widget)
 
+        # Top row: shortcut info button (right-aligned)
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.addStretch(1)
+        from ltd.widgets.info_button import DynamicInfoButton
+        from ltd.widgets.info_text import MODIFY_SHORTCUTS_GLOBAL
+        self.shortcuts_info = DynamicInfoButton(
+            lambda: MODIFY_SHORTCUTS_GLOBAL)
+        header.addWidget(self.shortcuts_info)
+        right_layout.addLayout(header)
+
         # Modification settings
         mod_group = QGroupBox('Modification')
         mod_layout = QVBoxLayout(mod_group)
