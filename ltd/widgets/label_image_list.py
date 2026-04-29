@@ -4,11 +4,13 @@ import re
 from fnmatch import fnmatchcase
 
 from PySide6.QtCore import QModelIndex, QSize, QSortFilterProxyModel, Qt, Signal
-from PySide6.QtWidgets import (QFileDialog, QLabel, QLineEdit, QListView,
-                               QVBoxLayout, QWidget, QPushButton)
+from PySide6.QtWidgets import (QFileDialog, QHBoxLayout, QLabel, QLineEdit,
+                               QListView, QPushButton, QVBoxLayout, QWidget)
 
 from ltd.data.image_item import ImageItem
 from ltd.data.image_list_model import ImageListModel
+from ltd.widgets.info_button import InfoButton
+from ltd.widgets.info_text import LABEL_FILTER_HELP
 
 
 class LabelFilterProxyModel(QSortFilterProxyModel):
@@ -190,11 +192,15 @@ class LabelImageList(QWidget):
         self.load_button = QPushButton('Load Folder...')
         layout.addWidget(self.load_button)
 
+        filter_row = QHBoxLayout()
+        filter_row.setContentsMargins(0, 0, 0, 0)
         self.filter_input = QLineEdit()
         self.filter_input.setPlaceholderText(
             'Filter: class:x, labels:>N, name:*, or, not/-')
         self.filter_input.setClearButtonEnabled(True)
-        layout.addWidget(self.filter_input)
+        filter_row.addWidget(self.filter_input, stretch=1)
+        filter_row.addWidget(InfoButton(LABEL_FILTER_HELP))
+        layout.addLayout(filter_row)
 
         self.list_view = QListView()
         self.list_view.setModel(self.proxy)

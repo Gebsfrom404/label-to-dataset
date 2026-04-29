@@ -54,6 +54,17 @@ Binary PNG files: white = labeled area, black = background.
 - Generated from labels/brush in Label tab, consumed by Modify tab
 - Utilities in `ltd/utils/mask_utils.py`
 
+## Generation Metadata (Manage Gen Images tab)
+
+Read-only parser in `ltd/data/gen_metadata.py`. PNG text chunks are read via Pillow.
+
+- **forge / a1111**: single `parameters` chunk. Format is `<positive>\nNegative prompt: <negative>\nSteps: 30, Sampler: ..., Size: WxH, ...`. The settings line is split on `, ` boundaries that look like `Key: ` (allows spaces in keys); quoted `"..."` and JSON `{...}` values are kept intact.
+- **ComfyUI**: `prompt` chunk holds the executable graph (JSON dict of `{node_id: {class_type, inputs, _meta}}`); `workflow` chunk holds the editor layout. Parser walks back from sampler nodes' `positive`/`negative` link inputs to find `*TextEncode` nodes; if no sampler is recognized it falls back to title-based detection ("Positive"/"Negative" in `_meta.title`). Loras / VAE / model / latent size are scanned across all nodes.
+
+`GenMetadata.tags` is derived by `split_prompt_tags()`: commas are the primary separator, plus `<lora:...>` blocks are forced into their own tag (commas are injected on both sides before splitting), and the keywords `AND`, `BREAK`, `ADDBASE`, `ADDCOMM`, `ADDCOL`, `ADDROW` are treated as commas (they vanish but split the surrounding text). Settings are stored verbatim in `GenMetadata.settings: dict`. Parsing runs via `ltd/workers/metadata_worker.py`; on directory load the tab opens `loading_dialog`, runs the worker inside a `QEventLoop`, and pipes the worker's `progress(current, total)` signal into `LoadingDialog.set_progress` so the UI shows N/total. The worker emits `parsed(ImageItem, GenMetadata)` (keyed by reference, not row, so it's row-shift safe).
+
+`ImageItem.metadata: GenMetadata | None` carries the parsed result on the shared image dataclass.
+
 ## Captions
 
 Plain `.txt` files with tags, stored alongside images.

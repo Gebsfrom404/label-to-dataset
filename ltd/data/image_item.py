@@ -1,8 +1,11 @@
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from ltd.data.label_data import Label
+
+if TYPE_CHECKING:
+    from ltd.data.gen_metadata import GenMetadata
 
 
 @dataclass
@@ -16,6 +19,7 @@ class ImageItem:
     modified_path: Optional[Path] = None
     original_path: Optional[Path] = None
     relative_path: str = ''
+    metadata: Optional['GenMetadata'] = None
     _thumbnail: object = field(default=None, repr=False)
 
     @property
