@@ -386,7 +386,9 @@ class CaptionImageList(QWidget):
 
         self._act_delete_images = self.context_menu.addAction(
             'Delete Image with Tags')
-        self._act_delete_images.setShortcut('Ctrl+Del')
+        # Ctrl+Shift+Del, not Ctrl+Del — the latter deletes a word in the
+        # tag input / caption text box and is too easy to hit by accident.
+        self._act_delete_images.setShortcut('Ctrl+Shift+Del')
         self._act_delete_images.triggered.connect(self._delete_images_with_tags)
 
         self._act_open = self.context_menu.addAction(

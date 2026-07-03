@@ -15,9 +15,9 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox,
                                QGraphicsScene, QGraphicsView,
                                QGroupBox, QHBoxLayout, QLabel, QLineEdit,
                                QListWidget, QListWidgetItem, QFileDialog,
-                               QMenu, QMessageBox, QProgressBar, QPushButton,
-                               QSpinBox, QSplitter, QTabWidget, QVBoxLayout,
-                               QWidget)
+                               QMenu, QMessageBox, QPlainTextEdit, QProgressBar,
+                               QPushButton, QSpinBox, QSplitter, QTabWidget,
+                               QVBoxLayout, QWidget)
 
 from ltd.comfyui.client import ComfyUIClient
 from ltd.comfyui.workflow import (load_workflow, validate_caption_workflow,
@@ -586,6 +586,16 @@ class CaptionTab(QWidget):
         self._skip_snapshot = False
         self._next_batch_id = 0
 
+        # Caption (natural-language) panel state. Captions share the same
+        # .txt file / image.tags as tags — the caption box is just an
+        # alternate view of the joined-tag text, so auto-save, snapshots,
+        # export and undo all reuse the tag machinery unchanged.
+        self._panel_mode = 'tags'  # 'tags' | 'caption'
+        self._loading_caption = False
+        self._caption_debounce = QTimer(self)
+        self._caption_debounce.setSingleShot(True)
+        self._caption_debounce.setInterval(400)
+
         # Tag dictionary for autocomplete + colors
         self._tag_dict = TagDictionary()
         autocomp_dir = Path('autocompletions')
@@ -622,11 +632,20 @@ class CaptionTab(QWidget):
         # --- Right: Tabbed panel ---
         right = QWidget()
         right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(4)
 
-        # Top row: shortcut info button (right-aligned)
+        # Top row: mode dropdown + shortcut info button (right-aligned)
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
         header.addStretch(1)
+        # Toggle between the tag tabs and the natural-language caption box.
+        self.panel_mode_combo = QComboBox()
+        self.panel_mode_combo.addItems(['Tags', 'Caption'])
+        self.panel_mode_combo.setToolTip(
+            'Tags: edit comma-separated tags.\n'
+            'Caption: edit the same file as one natural-language caption.')
+        header.addWidget(self.panel_mode_combo)
         from ltd.widgets.info_button import DynamicInfoButton
         self.shortcuts_info = DynamicInfoButton(self._build_shortcuts_help)
         header.addWidget(self.shortcuts_info)
@@ -635,8 +654,8 @@ class CaptionTab(QWidget):
         self.right_tabs = QTabWidget()
 
         # ---- Tab: Image Tags ----
-        image_tags_tab = QWidget()
-        tag_layout = QVBoxLayout(image_tags_tab)
+        self.image_tags_tab = QWidget()
+        tag_layout = QVBoxLayout(self.image_tags_tab)
 
         input_layout = QHBoxLayout()
         self.tag_input = TagInputField()
@@ -661,11 +680,11 @@ class CaptionTab(QWidget):
         self.token_count_label = QLabel('Tags: 0 | ~0 tokens')
         tag_layout.addWidget(self.token_count_label)
 
-        self.right_tabs.addTab(image_tags_tab, 'Image Tags')
+        self.right_tabs.addTab(self.image_tags_tab, 'Image Tags')
 
         # ---- Tab: All Tags ----
-        all_tags_tab = QWidget()
-        all_tags_layout = QVBoxLayout(all_tags_tab)
+        self.all_tags_tab = QWidget()
+        all_tags_layout = QVBoxLayout(self.all_tags_tab)
 
         self.all_tags_filter = QLineEdit()
         self.all_tags_filter.setPlaceholderText('Filter tags...')
@@ -688,7 +707,7 @@ class CaptionTab(QWidget):
         self.all_tags_count_label = QLabel('0 tags')
         all_tags_layout.addWidget(self.all_tags_count_label)
 
-        self.right_tabs.addTab(all_tags_tab, 'All Tags')
+        self.right_tabs.addTab(self.all_tags_tab, 'All Tags')
 
         # ---- Tab: Auto-Caption ----
         caption_tab_w = QWidget()
@@ -813,7 +832,24 @@ class CaptionTab(QWidget):
         tools_layout.addStretch()
         self.right_tabs.addTab(tools_tab, 'Tools')
 
+        # ---- Tab: Image Caption (natural language) ----
+        # Sits inside the same tab widget; the Tags/Caption dropdown swaps it
+        # in for the Image Tags + All Tags tabs while keeping Auto-Caption and
+        # Tools available. Inserted at index 0 so it leads in Caption mode.
+        self.caption_panel = QWidget()
+        cap_panel_layout = QVBoxLayout(self.caption_panel)
+        self.caption_edit = QPlainTextEdit()
+        self.caption_edit.setPlaceholderText(
+            'Natural-language caption for this image...')
+        cap_panel_layout.addWidget(self.caption_edit)
+        self.caption_count_label = QLabel('0 chars | ~0 tokens')
+        cap_panel_layout.addWidget(self.caption_count_label)
+        self.right_tabs.insertTab(0, self.caption_panel, 'Image Caption')
+
         right_layout.addWidget(self.right_tabs)
+
+        # Start in Tags mode: hide the Image Caption tab.
+        self._set_caption_mode_tabs(False)
 
         # Separator config
         sep_layout = QHBoxLayout()
@@ -880,6 +916,12 @@ class CaptionTab(QWidget):
 
         # Image viewer navigation
         self.image_viewer.navigate_image.connect(self._on_page_navigate)
+
+        # Panel mode (Tags / Caption) + caption editing
+        self.panel_mode_combo.currentIndexChanged.connect(
+            self._on_panel_mode_changed)
+        self.caption_edit.textChanged.connect(self._on_caption_text_changed)
+        self._caption_debounce.timeout.connect(self._commit_caption_edit)
 
         # All tags
         self.all_tags_filter.textChanged.connect(self._update_all_tags_display)
@@ -994,7 +1036,7 @@ class CaptionTab(QWidget):
 
     def _navigate_previous(self):
         focus = QApplication.focusWidget()
-        if isinstance(focus, QLineEdit):
+        if isinstance(focus, (QLineEdit, QPlainTextEdit)):
             return
         if (isinstance(focus, QAbstractItemView)
                 and focus.state() == QAbstractItemView.State.EditingState):
@@ -1003,7 +1045,7 @@ class CaptionTab(QWidget):
 
     def _navigate_next(self):
         focus = QApplication.focusWidget()
-        if isinstance(focus, QLineEdit):
+        if isinstance(focus, (QLineEdit, QPlainTextEdit)):
             return
         if (isinstance(focus, QAbstractItemView)
                 and focus.state() == QAbstractItemView.State.EditingState):
@@ -1028,6 +1070,10 @@ class CaptionTab(QWidget):
             s.value('caption/captioner', 0, type=int))
         self.separator_input.setText(
             s.value('caption/tag_separator', ', ', type=str))
+        # Applies visibility via _on_panel_mode_changed (only fires if the
+        # stored index differs from the combo's current 0).
+        self.panel_mode_combo.setCurrentIndex(
+            s.value('caption/panel_mode', 0, type=int))
 
     def _save_setting(self, key, value):
         get_settings().setValue(f'caption/{key}', value)
@@ -1057,6 +1103,92 @@ class CaptionTab(QWidget):
             return raw.encode('utf-8').decode('unicode_escape')
         except (UnicodeDecodeError, ValueError):
             return raw
+
+    # ------------------------------------------------------------------
+    # Caption mode (natural-language view of the same .txt / image.tags)
+    # ------------------------------------------------------------------
+
+    def _parse_caption_text(self, text: str) -> list[str]:
+        """Split caption box text into tags, mirroring load_tags_from_file."""
+        sep = self._get_separator()
+        key = sep.strip() or sep
+        return [t.strip() for t in text.split(key) if t.strip()]
+
+    def _set_caption_mode_tabs(self, is_caption: bool):
+        """Show the Image Caption tab or the Image Tags + All Tags tabs.
+
+        Auto-Caption and Tools stay visible in both modes.
+        """
+        tabs = self.right_tabs
+        tabs.setTabVisible(tabs.indexOf(self.caption_panel), is_caption)
+        tabs.setTabVisible(tabs.indexOf(self.image_tags_tab), not is_caption)
+        tabs.setTabVisible(tabs.indexOf(self.all_tags_tab), not is_caption)
+        tabs.setCurrentWidget(
+            self.caption_panel if is_caption else self.image_tags_tab)
+
+    def _on_panel_mode_changed(self, index: int):
+        mode = 'caption' if index == 1 else 'tags'
+        if mode == self._panel_mode:
+            return
+        # Flush the editor that's about to be hidden into the model.
+        self._save_current_tags()
+        self._panel_mode = mode
+        is_caption = mode == 'caption'
+        self._set_caption_mode_tabs(is_caption)
+        image = self.model.get_image(self._current_image_index)
+        if is_caption:
+            self._load_caption_into_edit(image)
+        else:
+            # tags_list may be stale after caption edits — refresh from model.
+            self._skip_snapshot = True
+            self.tags_list.set_tags(image.tags if image else [])
+            self._skip_snapshot = False
+            self._update_token_count()
+        self._save_setting('panel_mode', index)
+
+    def _load_caption_into_edit(self, image: ImageItem | None):
+        """Populate the caption box from an image's tags (as joined text)."""
+        self._caption_debounce.stop()
+        self._loading_caption = True
+        if image is not None:
+            self.caption_edit.setPlainText(self._get_separator().join(image.tags))
+        else:
+            self.caption_edit.setPlainText('')
+        self._loading_caption = False
+        self._pre_tags_snapshot = list(image.tags) if image is not None else None
+        self._update_token_count()
+
+    def _sync_caption_view(self):
+        """Reload the caption box from the current image (caption mode only)."""
+        if self._panel_mode == 'caption':
+            self._load_caption_into_edit(
+                self.model.get_image(self._current_image_index))
+
+    def _on_caption_text_changed(self):
+        if self._loading_caption:
+            return
+        self._update_token_count()
+        self._caption_debounce.start()
+
+    def _commit_caption_edit(self):
+        """Write pending caption edits back to image.tags (undo + autosave)."""
+        self._caption_debounce.stop()
+        idx = self._current_image_index
+        if idx < 0:
+            return
+        image = self.model.get_image(idx)
+        if image is None:
+            return
+        new_tags = self._parse_caption_text(self.caption_edit.toPlainText())
+        if new_tags == image.tags:
+            return
+        if self._pre_tags_snapshot is not None:
+            self._push_undo(idx, list(self._pre_tags_snapshot))
+        image.tags = new_tags
+        self._pre_tags_snapshot = list(new_tags)
+        self._auto_save_image(image)
+        self._rebuild_all_tags()
+        self._update_token_count()
 
     # ------------------------------------------------------------------
     # Auto-save
@@ -1130,6 +1262,7 @@ class CaptionTab(QWidget):
             self._skip_snapshot = True
             self.tags_list.set_tags(image.tags)
             self._skip_snapshot = False
+        self._sync_caption_view()
         self._rebuild_all_tags()
         self._update_token_count()
 
@@ -1179,6 +1312,7 @@ class CaptionTab(QWidget):
             self._skip_snapshot = True
             self.tags_list.set_tags(image.tags)
             self._skip_snapshot = False
+        self._sync_caption_view()
         self._rebuild_all_tags()
         self._update_token_count()
 
@@ -1243,6 +1377,7 @@ class CaptionTab(QWidget):
             image = self.model.get_image(self._current_image_index)
             if image:
                 self.tags_list.set_tags(image.tags)
+                self._sync_caption_view()
                 self._update_token_count()
         self.caption_status.setText(
             f'Reloaded tags for {len(self.model.images)} image(s)')
@@ -1322,6 +1457,8 @@ class CaptionTab(QWidget):
         self._skip_snapshot = True
         self.tags_list.set_tags(image.tags)
         self._skip_snapshot = False
+        if self._panel_mode == 'caption':
+            self._load_caption_into_edit(image)
         self._update_token_count()
         self._update_tag_highlights()
 
@@ -1337,6 +1474,7 @@ class CaptionTab(QWidget):
         else:
             self.image_viewer.load_image(None)
             self.tags_list.set_tags([])
+            self._sync_caption_view()
         self._rebuild_all_tags()
         self._update_token_count()
 
@@ -1397,6 +1535,10 @@ class CaptionTab(QWidget):
     def _save_current_tags(self):
         if self._current_image_index < 0:
             return
+        if self._panel_mode == 'caption':
+            # Caption box is the active editor — flush it (with undo/autosave).
+            self._commit_caption_edit()
+            return
         image = self.model.get_image(self._current_image_index)
         if image is None:
             return
@@ -1422,6 +1564,7 @@ class CaptionTab(QWidget):
                 self._skip_snapshot = True
                 self.tags_list.set_tags(image.tags)
                 self._skip_snapshot = False
+                self._sync_caption_view()
                 self._update_token_count()
         self._rebuild_all_tags()
         action = 'Pasted' if tags else 'Cleared'
@@ -1664,9 +1807,17 @@ class CaptionTab(QWidget):
         self._update_token_count()
 
     def _update_token_count(self):
+        # Rough CLIP token estimate: ~4 chars per token
+        if self._panel_mode == 'caption':
+            text = self.caption_edit.toPlainText()
+            tokens = len(text) // 4 if text else 0
+            label = f'{len(text)} chars | ~{tokens} tokens'
+            if tokens > 75:
+                label += ' (over 75!)'
+            self.caption_count_label.setText(label)
+            return
         count = self.tags_list.count()
         text = ', '.join(self.tags_list.get_tags())
-        # Rough CLIP token estimate: ~4 chars per token
         tokens = len(text) // 4 if text else 0
         label = f'Tags: {count} | ~{tokens} tokens'
         if tokens > 75:
@@ -1917,6 +2068,7 @@ class CaptionTab(QWidget):
                 self._skip_snapshot = True
                 self.tags_list.set_tags(image.tags)
                 self._skip_snapshot = False
+                self._sync_caption_view()
                 self._update_token_count()
         self._rebuild_all_tags()
 
@@ -1990,6 +2142,7 @@ class CaptionTab(QWidget):
                     self._skip_snapshot = True
                     self.tags_list.set_tags(image.tags)
                     self._skip_snapshot = False
+            self._sync_caption_view()
             self._rebuild_all_tags()
             self._update_token_count()
             dlg.result_label.setText(f'Replaced {count} occurrence(s)')
@@ -2023,6 +2176,7 @@ class CaptionTab(QWidget):
                     self._skip_snapshot = True
                     self.tags_list.set_tags(image.tags)
                     self._skip_snapshot = False
+            self._sync_caption_view()
             self._rebuild_all_tags()
             self.caption_status.setText(
                 f'Reordered tags in {count} image(s)')
@@ -2032,6 +2186,7 @@ class CaptionTab(QWidget):
     # ------------------------------------------------------------------
 
     def _remove_empty_all(self):
+        self._save_current_tags()
         count = 0
         bid = self._new_batch_id()
         for i, image in enumerate(self.model.images):
@@ -2049,10 +2204,12 @@ class CaptionTab(QWidget):
                 self._skip_snapshot = True
                 self.tags_list.set_tags(image.tags)
                 self._skip_snapshot = False
+        self._sync_caption_view()
         self._rebuild_all_tags()
         self.caption_status.setText(f'Removed {count} empty tag(s)')
 
     def _remove_duplicates_all(self):
+        self._save_current_tags()
         count = 0
         bid = self._new_batch_id()
         for i, image in enumerate(self.model.images):
@@ -2077,6 +2234,7 @@ class CaptionTab(QWidget):
                 self._skip_snapshot = True
                 self.tags_list.set_tags(image.tags)
                 self._skip_snapshot = False
+        self._sync_caption_view()
         self._rebuild_all_tags()
         self.caption_status.setText(
             f'Removed {count} duplicate(s) across all images')
@@ -2163,6 +2321,7 @@ class CaptionTab(QWidget):
                 self._skip_snapshot = True
                 self.tags_list.set_tags(image.tags)
                 self._skip_snapshot = False
+        self._sync_caption_view()
         self._rebuild_all_tags()
         self._update_token_count()
 
@@ -2267,6 +2426,7 @@ class CaptionTab(QWidget):
                 self._skip_snapshot = True
                 self.tags_list.set_tags(image.tags)
                 self._skip_snapshot = False
+        self._sync_caption_view()
         self._rebuild_all_tags()
         self._update_token_count()
 
