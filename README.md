@@ -53,7 +53,7 @@ Apply modifications to images using their label masks (e.g., inpaint/remove dete
 Tag images with text captions for training text-to-image or classification models.
 
 **Captioning methods:**
-- **WD Tagger** — automatic tagging using WD Eva02 Large Tagger v3 (auto-downloaded from HuggingFace). Configurable probability threshold, max tags, and exclude list.
+- **WD Tagger** — automatic tagging using WD Eva02 Large Tagger v3 or animetimm ConvNeXtV2 Huge (dbv4-full), auto-downloaded from HuggingFace. Configurable probability threshold, max tags, and exclude list. The animetimm (dbv4) model may require a HuggingFace login — see [Models](#models).
 - **ComfyUI Workflow** — run any ComfyUI captioning workflow.
 
 **Tag editing:**
@@ -149,6 +149,20 @@ Place models in the corresponding directories:
 | YOLO (.pt) | `./models/yolo/` | For detection and training. YOLO11 base models download automatically. |
 | big-lama (.pt) | `./models/lama/` | For inpainting. Download `big-lama.pt` manually. |
 | WD Tagger | `./models/caption/` | Auto-downloaded from HuggingFace on first use. |
+
+### HuggingFace login for the animetimm (dbv4) tagger
+
+The **animetimm ConvNeXtV2 Huge (dbv4-full)** tagger is served from a HuggingFace repo that may require you to be authenticated. If the first download fails with a `401`/gated-repo error, authenticate once inside the project's virtual environment:
+
+```bash
+# Activate the venv first
+.venv\Scripts\activate          # Windows
+# source .venv/bin/activate     # Linux/macOS
+
+hf auth login                   # paste a token from https://huggingface.co/settings/tokens
+```
+
+This stores the token in `~/.cache/huggingface/`, and `huggingface_hub` reads it automatically on every subsequent run — no need to re-login. Alternatively, set the `HF_TOKEN` environment variable before launching (e.g. in `launch.bat`). A read-only token is sufficient; if the model card shows an "Agree and access" gate, accept it on the model page first.
 
 ## Project Structure
 

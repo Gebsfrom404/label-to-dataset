@@ -23,7 +23,12 @@ Mask dilation controlled by `mask_grow` setting (default 5px).
 
 ## WD Tagger (Caption Tab)
 
-Auto-captioning using SmilingWolf WD tagger models. Implemented in caption_tab.py.
+Auto-captioning using timm-based tagger models. Implemented in caption_tab.py.
+`WdTaggerCaptioner` is the base (SmilingWolf `wd-eva02-large-tagger-v3`);
+`AnimeTimmCaptioner` subclasses it for `animetimm/convnextv2_huge.dbv4-full`.
+The `CaptionTab._WD_MODELS` tuple lists the WD-style taggers shown in the
+Auto-Caption dropdown (before the `ComfyUI Workflow` entry); all share the same
+settings panel and index-based dispatch (`index < len(_WD_MODELS)` → WD tagger).
 
 ### Stack: timm + safetensors (PyTorch)
 
@@ -43,14 +48,28 @@ model.load_state_dict(state_dict)
 
 Models downloaded via `huggingface_hub.hf_hub_download()` to `models/caption/`. Files: `model.safetensors`, `selected_tags.csv`, `config.json`.
 
-### Preprocessing — BGR, normalized, NCHW
+### Preprocessing — configurable per model, NCHW
 
-**Critical**: SmilingWolf models expect BGR channel order. Normalize with mean=0.5/std=0.5, NCHW format for PyTorch.
+Preprocessing is driven by class attributes so subclasses only override what
+differs: `INPUT_SIZE`, `_BGR`, `_MEAN`, `_STD`. Image is padded to a square with
+white background, resized to `INPUT_SIZE`, optionally flipped to BGR, then
+normalized. `_MEAN`/`_STD` may be a scalar or a per-channel numpy array (RGB
+order); broadcasting handles both.
 
 ```python
-arr = np.array(canvas, dtype=np.float32)[:, :, ::-1] / 255.0  # RGB→BGR + scale
-arr = (arr - 0.5) / 0.5  # normalize to [-1, 1]
-tensor = torch.from_numpy(arr.copy()).permute(2, 0, 1).unsqueeze(0)  # NCHW
+arr = np.array(canvas, dtype=np.float32) / 255.0
+if self._BGR:
+    arr = arr[:, :, ::-1]
+arr = (arr - self._MEAN) / self._STD
+tensor = torch.from_numpy(np.ascontiguousarray(arr, dtype=np.float32)) \
+    .permute(2, 0, 1).unsqueeze(0)  # NCHW
 ```
 
-Input dimension hardcoded to 448 (from config).
+- **SmilingWolf** (`WdTaggerCaptioner`): BGR, mean=0.5/std=0.5 → [-1, 1], 448px.
+- **animetimm** (`AnimeTimmCaptioner`): RGB, ImageNet mean/std
+  (`[0.485,0.456,0.406]`/`[0.229,0.224,0.225]`), 512px. Repo is HF-gated —
+  `hf_hub_download` needs the user's HF token/login to fetch weights.
+
+Both use the same `selected_tags.csv` convention (`name`, `category` with
+`9` = rating filtered out). Thresholding uses the UI `min_probability` slider
+for both (animetimm's `best_threshold` column is ignored).

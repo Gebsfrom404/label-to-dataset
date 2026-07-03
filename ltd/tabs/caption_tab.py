@@ -48,6 +48,11 @@ class WdTaggerCaptioner:
     MODEL_REPO = 'SmilingWolf/wd-eva02-large-tagger-v3'
     MODELS_BASE = Path('./models/caption')
     INPUT_SIZE = 448
+    # Preprocessing: SmilingWolf models expect BGR, normalized to [-1, 1]
+    # (mean=0.5, std=0.5). Subclasses override for other conventions.
+    _BGR = True
+    _MEAN = 0.5
+    _STD = 0.5
 
     def __init__(self, min_probability: float = 0.35, max_tags: int = 50,
                  exclude_tags: list[str] | None = None):
@@ -136,10 +141,14 @@ class WdTaggerCaptioner:
             canvas = canvas.resize((self.INPUT_SIZE, self.INPUT_SIZE),
                                    resample=PilImage.Resampling.BICUBIC)
 
-        # BGR, normalized with mean=0.5/std=0.5, NCHW
-        arr = np.array(canvas, dtype=np.float32)[:, :, ::-1] / 255.0
-        arr = (arr - 0.5) / 0.5
-        tensor = torch.from_numpy(arr.copy()).permute(2, 0, 1).unsqueeze(0)
+        # Normalize per model config (BGR/mean/std), NCHW for PyTorch.
+        arr = np.array(canvas, dtype=np.float32) / 255.0
+        if self._BGR:
+            arr = arr[:, :, ::-1]
+        arr = (arr - self._MEAN) / self._STD
+        tensor = torch.from_numpy(
+            np.ascontiguousarray(arr, dtype=np.float32)
+        ).permute(2, 0, 1).unsqueeze(0)
         tensor = tensor.to(self._device)
 
         with torch.no_grad():
@@ -159,6 +168,20 @@ class WdTaggerCaptioner:
 
         results.sort(key=lambda x: x[1], reverse=True)
         return [tag for tag, _ in results[:self.max_tags]]
+
+
+class AnimeTimmCaptioner(WdTaggerCaptioner):
+    """animetimm (deepghs) tagger — RGB, ImageNet normalization, 512px input.
+
+    Shares the timm + safetensors loading and tag-thresholding of the base
+    class; only the model repo and preprocessing convention differ.
+    """
+
+    MODEL_REPO = 'animetimm/convnextv2_huge.dbv4-full'
+    INPUT_SIZE = 512
+    _BGR = False
+    _MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+    _STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
 
 class ComfyUICaptioner:
@@ -541,6 +564,9 @@ class CaptionImageViewer(QGraphicsView):
 
 class CaptionTab(QWidget):
     _PIXMAP_CACHE_MAX = 5
+    # WD-style taggers shown before the 'ComfyUI Workflow' entry; they share
+    # the same settings panel (min probability, max tags, exclude, position).
+    _WD_MODELS = (WdTaggerCaptioner, AnimeTimmCaptioner)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -669,8 +695,9 @@ class CaptionTab(QWidget):
         caption_layout = QVBoxLayout(caption_tab_w)
 
         self.captioner_combo = QComboBox()
-        self.captioner_combo.addItems(
-            [WdTaggerCaptioner.MODEL_REPO, 'ComfyUI Workflow'])
+        for cls in self._WD_MODELS:
+            self.captioner_combo.addItem(cls.MODEL_REPO)
+        self.captioner_combo.addItem('ComfyUI Workflow')
         caption_layout.addWidget(self.captioner_combo)
 
         # WD Tagger settings
@@ -1796,15 +1823,17 @@ class CaptionTab(QWidget):
     # ------------------------------------------------------------------
 
     def _on_captioner_changed(self, index):
-        self.wd_settings.setVisible(index == 0)
-        self.comfy_settings.setVisible(index == 1)
+        is_comfy = index >= len(self._WD_MODELS)
+        self.wd_settings.setVisible(not is_comfy)
+        self.comfy_settings.setVisible(is_comfy)
 
     def _create_captioner(self):
-        if self.captioner_combo.currentIndex() == 0:
+        index = self.captioner_combo.currentIndex()
+        if index < len(self._WD_MODELS):
             exclude_text = self.exclude_input.text().strip()
             exclude_tags = [t.strip() for t in exclude_text.split(',')
                            if t.strip()] if exclude_text else None
-            return WdTaggerCaptioner(
+            return self._WD_MODELS[index](
                 min_probability=self.prob_spin.value(),
                 max_tags=self.max_tags_spin.value(),
                 exclude_tags=exclude_tags,
