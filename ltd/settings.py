@@ -8,6 +8,7 @@ DEFAULT_SETTINGS = {
     'font_size': 12,
     'theme': 'dark',
     'comfyui_url': 'http://127.0.0.1:8188',
+    'lmstudio_url': 'http://localhost:1234',
     'image_list_image_width': 160,
     'image_list_file_formats': 'bmp, gif, jpg, jpeg, png, tif, tiff, webp',
     'tag_separator': ', ',

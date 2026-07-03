@@ -30,6 +30,14 @@ class ToolbarWidget(QToolBar):
         self.comfyui_url.setPlaceholderText('http://127.0.0.1:8188')
         layout.addWidget(self.comfyui_url)
 
+        # LM Studio URL
+        layout.addWidget(QLabel('LM Studio:'))
+        self.lmstudio_url = SettingsLineEdit(
+            'lmstudio_url', DEFAULT_SETTINGS['lmstudio_url'])
+        self.lmstudio_url.setMinimumWidth(160)
+        self.lmstudio_url.setPlaceholderText('http://localhost:1234')
+        layout.addWidget(self.lmstudio_url)
+
         layout.addStretch()
 
         # Theme
