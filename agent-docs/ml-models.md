@@ -27,8 +27,11 @@ Auto-captioning using timm-based tagger models. Implemented in caption_tab.py.
 `WdTaggerCaptioner` is the base (SmilingWolf `wd-eva02-large-tagger-v3`);
 `AnimeTimmCaptioner` subclasses it for `animetimm/convnextv2_huge.dbv4-full`.
 The `CaptionTab._WD_MODELS` tuple lists the WD-style taggers shown in the
-Auto-Caption dropdown (before the `ComfyUI Workflow` entry); all share the same
-settings panel and index-based dispatch (`index < len(_WD_MODELS)` → WD tagger).
+Auto-Caption dropdown, followed by the `ComfyUI Workflow` and `LM Studio`
+entries. Dispatch (`_on_captioner_changed` / `_create_captioner`) is by the
+combo's current *text* for the two special entries, falling back to
+`_WD_MODELS[index]` for the taggers; each captioner has its own settings panel
+(`wd_settings` / `comfy_settings` / `lmstudio_settings`), one visible at a time.
 
 ### Stack: timm + safetensors (PyTorch)
 
@@ -73,3 +76,42 @@ tensor = torch.from_numpy(np.ascontiguousarray(arr, dtype=np.float32)) \
 Both use the same `selected_tags.csv` convention (`name`, `category` with
 `9` = rating filtered out). Thresholding uses the UI `min_probability` slider
 for both (animetimm's `best_threshold` column is ignored).
+
+## LM Studio Captioner (Caption Tab)
+
+Natural-language captioning via a local LM Studio vision model. Client:
+`ltd/lmstudio/client.py` (`LMStudioClient`) — uses LM Studio's OpenAI-compatible
+REST API (`requests`, no extra SDK), mirroring `ltd/comfyui/client.py`:
+- URL from the `lmstudio_url` setting (toolbar field, default
+  `http://localhost:1234`); `/v1` is appended if absent.
+- `list_models(vision_only=True)` fills the **Model** dropdown with only
+  vision-capable models. It queries LM Studio's **native** `GET /api/v0/models`
+  (which reports a per-model `type` of `llm`/`vlm`/`embeddings`) and keeps only
+  `type == 'vlm'`. If that endpoint is missing (older LM Studio), it falls back
+  to `GET /v1/models`, which carries no capability info, so filtering is skipped
+  there. Triggered by the **Refresh** button or the first on-demand switch to
+  LM Studio — never during startup restore (gated by `_lm_autorefresh_enabled`),
+  so a down server can't block launch.
+- `caption(path, model, system_prompt, user_text)` → `POST /v1/chat/completions`
+  with the image inlined as a base64 `data:` URI and the system prompt as a
+  `system` message.
+
+`LMStudioCaptioner` (in `caption_tab.py`) implements the standard
+`caption(path) -> list[str]` captioner interface:
+- **System prompt** and **Append current caption** switch are persisted at
+  `caption/lmstudio_system_prompt`, `caption/lmstudio_append`,
+  `caption/lmstudio_model`.
+- "Append current caption" = send the image's current `.txt` content to the
+  model as context (it does **not** append to the output).
+- `strip_thinking()` removes `<think>…</think>` reasoning blocks from the reply.
+- The result is split on the tag separator and **replaces** the existing
+  caption: the captioner sets `replaces_caption = True`, which `CaptionTab`
+  reads into `_caption_replace` so `_merge_tags` overwrites instead of honoring
+  the WD-tagger Position combo.
+- After the batch, `CaptionWorker` calls the captioner's optional `finalize()`
+  hook (in the worker thread, so no UI stall). `LMStudioCaptioner.finalize()`
+  unloads the model via `LMStudioClient.unload_model()` →
+  `POST /api/v1/models/unload` `{"instance_id": <model>}` (LM Studio 0.4.0+ v1
+  API) to free VRAM. Best-effort: silently no-ops on older builds / 404 /
+  connection errors. WD and ComfyUI captioners have no `finalize`, so the hook
+  is skipped for them.

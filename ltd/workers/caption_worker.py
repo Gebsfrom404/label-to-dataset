@@ -37,6 +37,17 @@ class CaptionWorker(BaseWorker):
                 self._cleanup_memory()
 
         self.progress.emit(total, total)
+
+        # Let the captioner release resources after the batch (e.g. LM Studio
+        # unloads the model to free VRAM). Best-effort — never fail the run.
+        finalize = getattr(self.captioner, 'finalize', None)
+        if finalize is not None:
+            self.status.emit('Finishing up (unloading model)...')
+            try:
+                finalize()
+            except Exception:
+                pass
+
         if errors:
             self.error.emit('Captioning errors:\n' + '\n'.join(errors))
         else:

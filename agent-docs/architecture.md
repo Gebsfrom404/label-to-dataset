@@ -30,7 +30,7 @@ Each tab is a QWidget in `ltd/tabs/`. MainWindow holds them in a QTabWidget and 
 | Image list (Modify) | `ltd/widgets/image_list_widget.py` | Simple image list widget used by ModifyTab |
 | Module selector | `ltd/widgets/module_selector.py` | Plugin dropdown + dynamic settings panel, QSettings persistence |
 | Settings widgets | `ltd/widgets/settings_widgets.py` | Auto-persisting QSettings-bound Qt widgets |
-| Toolbar | `ltd/widgets/toolbar_widget.py` | ComfyUI URL, theme toggle, font size |
+| Toolbar | `ltd/widgets/toolbar_widget.py` | ComfyUI URL, LM Studio URL, theme toggle, font size |
 | Collapsible panel | `ltd/widgets/collapsible_panel.py` | Expandable/collapsible QFrame with header button (used by Extras tab) |
 | Loading dialog | `ltd/widgets/loading_dialog.py` | Frameless modal dialog. Indeterminate by default; call `set_progress(current, total)` to switch to determinate. Shared by every tab that does mass loading (Label, Modify, Caption, Manage Gen Images) |
 | Info button | `ltd/widgets/info_button.py` | Small "ⓘ" QToolButton with rich-text tooltip. `InfoButton(html)` is static; `DynamicInfoButton(provider)` calls a `() → str` each time so content can change with focus. `focus_in(widget)` helper checks if a widget contains `QApplication.focusWidget()` |

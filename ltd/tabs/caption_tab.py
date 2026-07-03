@@ -16,8 +16,8 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox,
                                QGroupBox, QHBoxLayout, QLabel, QLineEdit,
                                QListWidget, QListWidgetItem, QFileDialog,
                                QMenu, QMessageBox, QPlainTextEdit, QProgressBar,
-                               QPushButton, QSpinBox, QSplitter, QTabWidget,
-                               QVBoxLayout, QWidget)
+                               QPushButton, QSizePolicy, QSpinBox, QSplitter,
+                               QTabWidget, QVBoxLayout, QWidget)
 
 from ltd.comfyui.client import ComfyUIClient
 from ltd.comfyui.workflow import (load_workflow, validate_caption_workflow,
@@ -213,6 +213,73 @@ class ComfyUICaptioner:
             text = result['texts'][0]
             return [t.strip() for t in text.split(',') if t.strip()]
         return []
+
+
+def strip_thinking(text: str) -> str:
+    """Remove <think>...</think> reasoning blocks from model output."""
+    cleaned = re.sub(r'<think>.*?</think>', '', text,
+                     flags=re.DOTALL | re.IGNORECASE)
+    if '</think>' in cleaned.lower():
+        cleaned = re.split(r'</think>', cleaned, flags=re.IGNORECASE)[-1]
+    return cleaned.strip()
+
+
+class LMStudioCaptioner:
+    """Natural-language captioning via an LM Studio vision model.
+
+    Produces a single caption per image (returned split on the tag separator
+    so it round-trips with the shared .txt storage). Always overwrites the
+    existing caption; when ``append_context`` is set the image's current
+    caption/tags are sent to the model as context to steer the description.
+    """
+
+    # Signals CaptionTab that results replace the caption rather than merging
+    # via the WD-tagger Position combo.
+    replaces_caption = True
+
+    def __init__(self, model: str, system_prompt: str = '',
+                 append_context: bool = False, separator: str = ', '):
+        self.model = model
+        self.system_prompt = system_prompt
+        self.append_context = append_context
+        self.separator = separator
+
+    def _current_caption(self, image_path: Path) -> str:
+        txt = image_path.with_suffix('.txt')
+        if txt.exists():
+            try:
+                return txt.read_text(encoding='utf-8').strip()
+            except OSError:
+                return ''
+        return ''
+
+    def caption(self, image_path: Path) -> list[str]:
+        from ltd.lmstudio.client import LMStudioClient
+        client = LMStudioClient()
+
+        user_text = None
+        if self.append_context:
+            existing = self._current_caption(image_path)
+            if existing:
+                user_text = ('Here is the current caption/tags describing '
+                             f'this image, use it as context: {existing}')
+
+        raw = client.caption(image_path, self.model,
+                             system_prompt=self.system_prompt,
+                             user_text=user_text)
+        caption = strip_thinking(raw)
+        if not caption:
+            return []
+        key = self.separator.strip() or self.separator
+        return [t.strip() for t in caption.split(key) if t.strip()]
+
+    def finalize(self):
+        """Called once after the batch — unload the model to free memory."""
+        from ltd.lmstudio.client import LMStudioClient
+        try:
+            LMStudioClient().unload_model(self.model)
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -592,6 +659,10 @@ class CaptionTab(QWidget):
         # export and undo all reuse the tag machinery unchanged.
         self._panel_mode = 'tags'  # 'tags' | 'caption'
         self._loading_caption = False
+        # Suppresses the LM Studio model auto-query until construction is done,
+        # so restoring an LM-Studio captioner selection can't block startup on
+        # a network request.
+        self._lm_autorefresh_enabled = False
         self._caption_debounce = QTimer(self)
         self._caption_debounce.setSingleShot(True)
         self._caption_debounce.setInterval(400)
@@ -612,6 +683,8 @@ class CaptionTab(QWidget):
         self._setup_shortcuts()
         self._restore_settings()
         self._connect_settings_persistence()
+        # Construction done — LM Studio model queries may now run on demand.
+        self._lm_autorefresh_enabled = True
 
     # ------------------------------------------------------------------
     # UI Setup
@@ -717,6 +790,7 @@ class CaptionTab(QWidget):
         for cls in self._WD_MODELS:
             self.captioner_combo.addItem(cls.MODEL_REPO)
         self.captioner_combo.addItem('ComfyUI Workflow')
+        self.captioner_combo.addItem('LM Studio')
         caption_layout.addWidget(self.captioner_combo)
 
         # WD Tagger settings
@@ -772,6 +846,48 @@ class CaptionTab(QWidget):
         comfy_layout_inner.addWidget(info)
         caption_layout.addWidget(self.comfy_settings)
         self.comfy_settings.setVisible(False)
+
+        # LM Studio settings
+        self.lmstudio_settings = QWidget()
+        lm_layout = QVBoxLayout(self.lmstudio_settings)
+        lm_layout.setContentsMargins(0, 0, 0, 0)
+
+        lm_model_row = QHBoxLayout()
+        lm_model_row.addWidget(QLabel('Model:'))
+        self.lmstudio_model_combo = QComboBox()
+        self.lmstudio_model_combo.setEditable(True)
+        self.lmstudio_model_combo.setPlaceholderText(
+            'Refresh to load models')
+        self.lmstudio_model_combo.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        lm_model_row.addWidget(self.lmstudio_model_combo, 1)
+        self.lmstudio_refresh_btn = QPushButton('Refresh')
+        self.lmstudio_refresh_btn.setToolTip(
+            'Query the LM Studio URL for loaded models')
+        lm_model_row.addWidget(self.lmstudio_refresh_btn)
+        lm_layout.addLayout(lm_model_row)
+
+        lm_layout.addWidget(QLabel('System prompt:'))
+        self.lmstudio_system_prompt = QPlainTextEdit()
+        self.lmstudio_system_prompt.setPlaceholderText(
+            'Instructions for the captioning model...')
+        # Preferred (not Expanding) vertical policy so the panel stays compact
+        # and the tab's bottom stretch absorbs slack — otherwise the leftover
+        # space inflates the label above and opens a gap.
+        self.lmstudio_system_prompt.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.lmstudio_system_prompt.setMinimumHeight(90)
+        self.lmstudio_system_prompt.setMaximumHeight(160)
+        lm_layout.addWidget(self.lmstudio_system_prompt)
+
+        self.lmstudio_append_check = QCheckBox('Append current caption')
+        self.lmstudio_append_check.setToolTip(
+            'Send this image\'s current caption/tags to the model as context. '
+            'The generated caption overwrites the file either way.')
+        lm_layout.addWidget(self.lmstudio_append_check)
+
+        caption_layout.addWidget(self.lmstudio_settings)
+        self.lmstudio_settings.setVisible(False)
 
         cap_btn_layout = QHBoxLayout()
         self.caption_current_btn = QPushButton('Current')
@@ -941,6 +1057,8 @@ class CaptionTab(QWidget):
         # Captioner
         self.captioner_combo.currentIndexChanged.connect(
             self._on_captioner_changed)
+        self.lmstudio_refresh_btn.clicked.connect(
+            self._refresh_lmstudio_models)
         self.caption_current_btn.clicked.connect(
             lambda: self._run_captioning(mode='current'))
         self.caption_selected_btn.clicked.connect(
@@ -1070,6 +1188,14 @@ class CaptionTab(QWidget):
             s.value('caption/captioner', 0, type=int))
         self.separator_input.setText(
             s.value('caption/tag_separator', ', ', type=str))
+        # LM Studio captioner settings
+        self.lmstudio_system_prompt.setPlainText(
+            s.value('caption/lmstudio_system_prompt', '', type=str))
+        self.lmstudio_append_check.setChecked(
+            s.value('caption/lmstudio_append', False, type=bool))
+        saved_model = s.value('caption/lmstudio_model', '', type=str)
+        if saved_model:
+            self.lmstudio_model_combo.setCurrentText(saved_model)
         # Applies visibility via _on_panel_mode_changed (only fires if the
         # stored index differs from the combo's current 0).
         self.panel_mode_combo.setCurrentIndex(
@@ -1093,6 +1219,14 @@ class CaptionTab(QWidget):
         self.separator_input.editingFinished.connect(
             lambda: self._save_setting('tag_separator',
                                        self.separator_input.text()))
+        self.lmstudio_model_combo.currentTextChanged.connect(
+            lambda v: self._save_setting('lmstudio_model', v))
+        self.lmstudio_system_prompt.textChanged.connect(
+            lambda: self._save_setting(
+                'lmstudio_system_prompt',
+                self.lmstudio_system_prompt.toPlainText()))
+        self.lmstudio_append_check.toggled.connect(
+            lambda v: self._save_setting('lmstudio_append', v))
 
     def _get_separator(self) -> str:
         """Read separator from input, decode escape sequences."""
@@ -1974,13 +2108,73 @@ class CaptionTab(QWidget):
     # ------------------------------------------------------------------
 
     def _on_captioner_changed(self, index):
-        is_comfy = index >= len(self._WD_MODELS)
-        self.wd_settings.setVisible(not is_comfy)
+        text = self.captioner_combo.currentText()
+        is_comfy = text == 'ComfyUI Workflow'
+        is_lm = text == 'LM Studio'
+        is_wd = not is_comfy and not is_lm
+        self.wd_settings.setVisible(is_wd)
         self.comfy_settings.setVisible(is_comfy)
+        self.lmstudio_settings.setVisible(is_lm)
+        # Auto-populate the model list the first time LM Studio is shown
+        # (skipped during startup restore to avoid a blocking network call).
+        if (is_lm and self._lm_autorefresh_enabled
+                and self.lmstudio_model_combo.count() == 0):
+            self._refresh_lmstudio_models()
+
+    def _refresh_lmstudio_models(self):
+        """Query the LM Studio URL and fill the model dropdown."""
+        from ltd.lmstudio.client import LMStudioClient
+        self.caption_status.setText('LM Studio: querying models...')
+        QApplication.processEvents()
+        try:
+            models = LMStudioClient().list_models()
+        except Exception as e:
+            self.caption_status.setText(f'LM Studio: {e}')
+            return
+        # Preserve the current/saved selection across a refresh.
+        target = self.lmstudio_model_combo.currentText().strip() or \
+            get_settings().value('caption/lmstudio_model', '', type=str)
+        self.lmstudio_model_combo.blockSignals(True)
+        self.lmstudio_model_combo.clear()
+        self.lmstudio_model_combo.addItems(models)
+        # Default to the last-used model if it's still available, otherwise
+        # leave the selector empty rather than auto-picking the first entry.
+        if target and target in models:
+            self.lmstudio_model_combo.setCurrentText(target)
+        else:
+            self.lmstudio_model_combo.setCurrentIndex(-1)
+        self.lmstudio_model_combo.blockSignals(False)
+        if models:
+            self.caption_status.setText(
+                f'LM Studio: {len(models)} vision model(s) available')
+        else:
+            self.caption_status.setText(
+                'LM Studio: no vision-capable models found')
 
     def _create_captioner(self):
+        text = self.captioner_combo.currentText()
         index = self.captioner_combo.currentIndex()
-        if index < len(self._WD_MODELS):
+        if text == 'ComfyUI Workflow':
+            workflow_text = self._caption_workflow_selector.get_workflow_text()
+            if not workflow_text:
+                QMessageBox.warning(self, 'Warning', 'No workflow provided.')
+                return None
+            return ComfyUICaptioner(workflow_text)
+        elif text == 'LM Studio':
+            model = self.lmstudio_model_combo.currentText().strip()
+            if not model:
+                QMessageBox.warning(
+                    self, 'Warning',
+                    'No LM Studio model selected. Click Refresh to load '
+                    'the models from your LM Studio instance.')
+                return None
+            return LMStudioCaptioner(
+                model=model,
+                system_prompt=self.lmstudio_system_prompt.toPlainText(),
+                append_context=self.lmstudio_append_check.isChecked(),
+                separator=self._get_separator(),
+            )
+        else:
             exclude_text = self.exclude_input.text().strip()
             exclude_tags = [t.strip() for t in exclude_text.split(',')
                            if t.strip()] if exclude_text else None
@@ -1989,15 +2183,13 @@ class CaptionTab(QWidget):
                 max_tags=self.max_tags_spin.value(),
                 exclude_tags=exclude_tags,
             )
-        else:
-            workflow_text = self._caption_workflow_selector.get_workflow_text()
-            if not workflow_text:
-                QMessageBox.warning(self, 'Warning', 'No workflow provided.')
-                return None
-            return ComfyUICaptioner(workflow_text)
 
     def _merge_tags(self, existing: list[str], new_tags: list[str]) -> list[str]:
         """Merge new tags based on caption position setting."""
+        # Some captioners (LM Studio) produce a complete caption that replaces
+        # the existing one regardless of the WD-tagger Position combo.
+        if getattr(self, '_caption_replace', False):
+            return list(new_tags)
         pos = self.caption_position_combo.currentIndex()
         if pos == 0:  # Before existing
             return new_tags + existing
@@ -2010,6 +2202,9 @@ class CaptionTab(QWidget):
         captioner = self._create_captioner()
         if captioner is None:
             return
+        # Whether results overwrite the caption (LM Studio) or merge via the
+        # Position combo (WD taggers / ComfyUI).
+        self._caption_replace = getattr(captioner, 'replaces_caption', False)
 
         if mode == 'current':
             image = self.model.get_image(self._current_image_index)
