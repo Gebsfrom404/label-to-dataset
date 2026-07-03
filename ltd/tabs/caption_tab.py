@@ -8,7 +8,8 @@ from pathlib import Path
 
 import numpy as np
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QBrush, QColor, QKeySequence, QPainter, QPixmap, QShortcut
+from PySide6.QtGui import (QBrush, QColor, QImageReader, QKeySequence, QPainter,
+                           QPixmap, QShortcut)
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox,
                                QComboBox, QDialog, QDialogButtonBox,
                                QDoubleSpinBox,
@@ -21,14 +22,16 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox,
 
 from ltd.comfyui.client import ComfyUIClient
 from ltd.comfyui.workflow import (load_workflow, validate_caption_workflow,
-                                  set_input_image)
+                                  validate_generation_workflow,
+                                  set_input_image, set_input_text,
+                                  set_latent_size, set_seed)
 from ltd.data.image_item import ImageItem
 from ltd.data.tag_dictionary import TagDictionary
 from ltd.settings import get_settings
 from ltd.data.image_list_model import ImageListModel
 from ltd.dialogs.batch_reorder_dialog import BatchReorderDialog
 from ltd.dialogs.find_replace_dialog import FindReplaceDialog
-from ltd.utils.file_utils import get_temp_dir
+from ltd.utils.file_utils import get_temp_dir, get_temp_dir_no_clear
 from ltd.utils.image_utils import load_pixmap, load_pixmap_preview
 from ltd.widgets.caption_image_list import CaptionImageList
 from ltd.widgets.elided_label import ElidedLabel
@@ -36,6 +39,7 @@ from ltd.widgets.loading_dialog import loading_dialog
 from ltd.widgets.tag_completer_popup import TagCompleterPopup
 from ltd.widgets.workflow_selector import WorkflowSelector
 from ltd.workers.caption_worker import CaptionWorker
+from ltd.workers.generation_worker import GenerationWorker
 
 
 # ---------------------------------------------------------------------------
@@ -278,6 +282,110 @@ class LMStudioCaptioner:
         from ltd.lmstudio.client import LMStudioClient
         try:
             LMStudioClient().unload_model(self.model)
+        except Exception:
+            pass
+
+
+def generated_cache_name(image: ImageItem) -> str:
+    """Stable, collision-safe filename for an image's cached generated render.
+
+    Keyed by the relative path (not just the stem) so images with the same
+    name in different subfolders don't clobber each other in the flat cache.
+    """
+    rel = image.relative_path or image.filename
+    stem = Path(rel).with_suffix('').as_posix()
+    return re.sub(r'[^\w.\-]+', '_', stem) + '.png'
+
+
+class CaptionImageGenerator:
+    """Render an image's caption to a new image via a ComfyUI workflow.
+
+    Generates at the image's aspect ratio scaled to ~``megapixels`` MPix and
+    caches the result under ``cache_dir`` (never in the source folder).
+    """
+
+    # Fixed render seed so a regenerated image only changes when the caption
+    # changes (controlled comparison); also avoids rgthree's -1 randomize path.
+    SEED = 42
+
+    def __init__(self, workflow_json: str, cache_dir: Path,
+                 separator: str = ', ', megapixels: float = 1.0):
+        self.workflow_json = workflow_json
+        self.cache_dir = Path(cache_dir)
+        self.separator = separator
+        self.megapixels = megapixels
+
+    @staticmethod
+    def compute_dims(w: int, h: int, megapixels: float = 1.0,
+                     multiple: int = 16) -> tuple[int, int]:
+        """Width/height at the w:h aspect ratio totalling ~megapixels, snapped
+        to a multiple (latent-friendly)."""
+        if w <= 0 or h <= 0:
+            w = h = 1
+        total = megapixels * 1_000_000
+        aspect = w / h
+        width = (total * aspect) ** 0.5
+        height = total / width if width else total ** 0.5
+
+        def snap(x: float) -> int:
+            return max(multiple, int(round(x / multiple)) * multiple)
+
+        return snap(width), snap(height)
+
+    def _caption_text(self, image: ImageItem) -> str:
+        # In-memory tags reflect edits the tab flushes before generating;
+        # fall back to the .txt on disk.
+        if image.tags:
+            return self.separator.join(image.tags)
+        txt = image.path.with_suffix('.txt')
+        if txt.exists():
+            try:
+                return txt.read_text(encoding='utf-8').strip()
+            except OSError:
+                return ''
+        return ''
+
+    def _orig_size(self, image: ImageItem) -> tuple[int, int]:
+        if image.width and image.height:
+            return image.width, image.height
+        size = QImageReader(str(image.path)).size()
+        if size.isValid():
+            return size.width(), size.height()
+        return 1, 1
+
+    def generate(self, image: ImageItem) -> Path:
+        workflow = load_workflow(self.workflow_json)
+        if workflow is None:
+            raise ValueError('Invalid workflow JSON')
+        valid, msg = validate_generation_workflow(workflow)
+        if not valid:
+            raise ValueError(msg)
+
+        set_input_text(workflow, self._caption_text(image))
+        w, h = self._orig_size(image)
+        gw, gh = self.compute_dims(w, h, self.megapixels)
+        set_latent_size(workflow, gw, gh)
+        set_seed(workflow, self.SEED)
+
+        client = ComfyUIClient()
+        if not client.health_check():
+            raise ConnectionError('Cannot connect to ComfyUI')
+
+        out_dir = get_temp_dir('comfyui_generate_output')
+        result = client.run_workflow(workflow, out_dir)
+        files = result.get('files') or []
+        if not files:
+            raise ValueError('Workflow produced no image output')
+
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        dest = self.cache_dir / generated_cache_name(image)
+        shutil.copy2(files[0], dest)
+        return dest
+
+    def finalize(self):
+        """Called once after the batch — free ComfyUI's models/VRAM."""
+        try:
+            ComfyUIClient().free()
         except Exception:
             pass
 
@@ -569,6 +677,41 @@ class CaptionImageViewer(QGraphicsView):
         else:
             self._scene.setSceneRect(0, 0, 0, 0)
 
+    def load_comparison(self, first: QPixmap, second: QPixmap,
+                        stack_vertical: bool):
+        """Show `first` (original) beside/above `second` (generated).
+
+        `first` is placed at its native resolution (never downscaled); `second`
+        is scaled to share the common dimension so the pair displays at equal
+        size. Both keep their full pixmap, so zooming shows native detail.
+        Landscape originals stack top/bottom; square/portrait sit left/right.
+        """
+        self._scene.clear()
+        self._pixmap_item = None
+        gap = 12
+        it1 = self._scene.addPixmap(first)
+        it2 = self._scene.addPixmap(second)
+        it1.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
+        it2.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
+        if stack_vertical:
+            scale2 = first.width() / second.width() if second.width() else 1.0
+            it2.setScale(scale2)
+            it1.setPos(0, 0)
+            it2.setPos(0, first.height() + gap)
+            total_w = first.width()
+            total_h = first.height() + gap + second.height() * scale2
+        else:
+            scale2 = (first.height() / second.height()
+                      if second.height() else 1.0)
+            it2.setScale(scale2)
+            it1.setPos(0, 0)
+            it2.setPos(first.width() + gap, 0)
+            total_w = first.width() + gap + second.width() * scale2
+            total_h = first.height()
+        self._scene.setSceneRect(0, 0, total_w, total_h)
+        self._manually_zoomed = False
+        self._fit_image()
+
     def replace_pixmap(self, pixmap):
         """Swap pixmap data without resetting zoom/pan state."""
         if self._pixmap_item is None:
@@ -579,9 +722,9 @@ class CaptionImageViewer(QGraphicsView):
             self._fit_image()
 
     def _fit_image(self):
-        if self._pixmap_item:
-            self.fitInView(self._scene.sceneRect(),
-                           Qt.AspectRatioMode.KeepAspectRatio)
+        rect = self._scene.sceneRect()
+        if not rect.isEmpty():
+            self.fitInView(rect, Qt.AspectRatioMode.KeepAspectRatio)
             self._manually_zoomed = False
             self._update_drag_mode()
 
@@ -593,9 +736,9 @@ class CaptionImageViewer(QGraphicsView):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if not self._manually_zoomed and self._pixmap_item:
-            self.fitInView(self._scene.sceneRect(),
-                           Qt.AspectRatioMode.KeepAspectRatio)
+        rect = self._scene.sceneRect()
+        if not self._manually_zoomed and not rect.isEmpty():
+            self.fitInView(rect, Qt.AspectRatioMode.KeepAspectRatio)
 
     def wheelEvent(self, event):
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
@@ -663,6 +806,10 @@ class CaptionTab(QWidget):
         # so restoring an LM-Studio captioner selection can't block startup on
         # a network request.
         self._lm_autorefresh_enabled = False
+
+        # Caption→image generation (ComfyUI) + comparison cache.
+        self._gen_worker: GenerationWorker | None = None
+        self._generated_dir: Path | None = None
         self._caption_debounce = QTimer(self)
         self._caption_debounce.setSingleShot(True)
         self._caption_debounce.setInterval(400)
@@ -945,6 +1092,37 @@ class CaptionTab(QWidget):
         tools_row3.addStretch()
         tools_layout.addLayout(tools_row3)
 
+        # ---- Compare original image to generated from caption ----
+        gen_group = QGroupBox('Compare original image to generated from caption')
+        gen_layout = QVBoxLayout(gen_group)
+        self._generate_workflow_selector = WorkflowSelector(
+            settings_key='generate')
+        gen_layout.addWidget(self._generate_workflow_selector)
+        gen_info = QLabel(
+            'Renders the caption via ComfyUI at the original aspect ratio '
+            '(~1 MPix) and shows it beside the original. Required nodes: '
+            'LTD_Input_Text, LTD_Latent_Size, LTD_Output_Image.')
+        gen_info.setWordWrap(True)
+        gen_layout.addWidget(gen_info)
+
+        gen_btn_layout = QHBoxLayout()
+        gen_btn_layout.addWidget(QLabel('Generate:'))
+        self.generate_current_btn = QPushButton('Current')
+        self.generate_selected_btn = QPushButton('Selected')
+        self.generate_all_btn = QPushButton('All')
+        self.generate_cancel_btn = QPushButton('Cancel')
+        self.generate_cancel_btn.setVisible(False)
+        gen_btn_layout.addWidget(self.generate_current_btn)
+        gen_btn_layout.addWidget(self.generate_selected_btn)
+        gen_btn_layout.addWidget(self.generate_all_btn)
+        gen_btn_layout.addWidget(self.generate_cancel_btn)
+        gen_layout.addLayout(gen_btn_layout)
+
+        self.generate_progress = QProgressBar()
+        self.generate_progress.setVisible(False)
+        gen_layout.addWidget(self.generate_progress)
+        tools_layout.addWidget(gen_group)
+
         tools_layout.addStretch()
         self.right_tabs.addTab(tools_tab, 'Tools')
 
@@ -1066,6 +1244,15 @@ class CaptionTab(QWidget):
         self.caption_all_btn.clicked.connect(
             lambda: self._run_captioning(mode='all'))
         self.caption_cancel_btn.clicked.connect(self._cancel_captioning)
+
+        # Generate from caption (comparison)
+        self.generate_current_btn.clicked.connect(
+            lambda: self._run_generation(mode='current'))
+        self.generate_selected_btn.clicked.connect(
+            lambda: self._run_generation(mode='selected'))
+        self.generate_all_btn.clicked.connect(
+            lambda: self._run_generation(mode='all'))
+        self.generate_cancel_btn.clicked.connect(self._cancel_generation)
 
         # Tools
         self.find_replace_btn.clicked.connect(self._show_find_replace)
@@ -1479,6 +1666,12 @@ class CaptionTab(QWidget):
         directory = Path(path)
         sep = self._get_separator()
 
+        # Per-folder cache for generated comparison images (persists across
+        # sessions; never written into the source folder). Keyed by folder path.
+        import hashlib
+        dir_hash = hashlib.md5(str(directory).encode()).hexdigest()[:12]
+        self._generated_dir = get_temp_dir_no_clear(f'generated_{dir_hash}')
+
         with loading_dialog('Loading images...', self) as dlg:
             self._cancel_fullres_loader()
             self._pixmap_cache.clear()
@@ -1571,21 +1764,27 @@ class CaptionTab(QWidget):
         # Cancel any in-flight full-res load
         self._cancel_fullres_loader()
 
-        key = str(image.path)
-        cached = self._pixmap_cache.get(key)
-        if cached:
-            # Cache hit — show immediately
-            self._pixmap_cache.move_to_end(key)
-            self.image_viewer.load_image(cached)
+        gen_path = self._generated_path(image)
+        if gen_path is not None:
+            # A generated render exists — show it beside the original.
+            self._show_comparison(image.path, gen_path)
         else:
-            # Show preview instantly, then swap full-res from background
-            pixmap = load_pixmap_preview(image.path, self._preview_max_dim())
-            self.image_viewer.load_image(pixmap)
+            key = str(image.path)
+            cached = self._pixmap_cache.get(key)
+            if cached:
+                # Cache hit — show immediately
+                self._pixmap_cache.move_to_end(key)
+                self.image_viewer.load_image(cached)
+            else:
+                # Show preview instantly, then swap full-res from background
+                pixmap = load_pixmap_preview(image.path,
+                                             self._preview_max_dim())
+                self.image_viewer.load_image(pixmap)
 
-            loader = _FullResLoader(image.path, self)
-            loader.ready.connect(self._on_fullres_ready)
-            loader.start()
-            self._fullres_loader = loader
+                loader = _FullResLoader(image.path, self)
+                loader.ready.connect(self._on_fullres_ready)
+                loader.start()
+                self._fullres_loader = loader
 
         # Show tags
         self._skip_snapshot = True
@@ -2279,6 +2478,123 @@ class CaptionTab(QWidget):
 
     def _on_caption_error(self, msg):
         QMessageBox.critical(self, 'Captioning Error', msg)
+
+    # ------------------------------------------------------------------
+    # Generate image from caption (ComfyUI) + side-by-side comparison
+    # ------------------------------------------------------------------
+
+    def _generated_path(self, image: ImageItem) -> Path | None:
+        """Cached generated render for an image, or None if not generated yet."""
+        if self._generated_dir is None:
+            return None
+        path = self._generated_dir / generated_cache_name(image)
+        return path if path.exists() else None
+
+    def _run_generation(self, mode: str = 'all'):
+        if self._gen_worker is not None:
+            return
+        workflow_text = self._generate_workflow_selector.get_workflow_text()
+        if not workflow_text:
+            QMessageBox.warning(self, 'Warning', 'No workflow provided.')
+            return
+        if self._generated_dir is None:
+            QMessageBox.information(self, 'Info', 'Load a folder first.')
+            return
+
+        # Flush any pending caption edit so the render uses the latest text.
+        self._save_current_tags()
+
+        if mode == 'current':
+            image = self.model.get_image(self._current_image_index)
+            if image is None:
+                return
+            images = [image]
+        elif mode == 'selected':
+            images = self.image_list.get_selected_images()
+            if not images:
+                QMessageBox.information(self, 'Info', 'No images selected.')
+                return
+        else:
+            images = list(self.model.images)
+        if not images:
+            return
+
+        generator = CaptionImageGenerator(
+            workflow_text, self._generated_dir,
+            separator=self._get_separator(), megapixels=1.0)
+        self._gen_images = images
+        worker = GenerationWorker(generator, images)
+        worker.progress.connect(self._on_generation_progress)
+        worker.status.connect(self._on_caption_status)
+        worker.generated.connect(self._on_generated_result)
+        worker.finished_work.connect(self._on_generation_finished)
+        worker.error.connect(self._on_generation_error)
+        self._gen_worker = worker
+
+        self.generate_progress.setVisible(len(images) > 1)
+        self.generate_cancel_btn.setVisible(True)
+        self.generate_current_btn.setEnabled(False)
+        self.generate_selected_btn.setEnabled(False)
+        self.generate_all_btn.setEnabled(False)
+        worker.start()
+
+    def _cancel_generation(self):
+        if self._gen_worker:
+            self._gen_worker.cancel()
+
+    def _on_generation_progress(self, current, total):
+        self.generate_progress.setMaximum(total)
+        self.generate_progress.setValue(current)
+
+    def _on_generated_result(self, index: int, path: str):
+        images = getattr(self, '_gen_images', self.model.images)
+        if not (0 <= index < len(images)):
+            return
+        image = images[index]
+        all_idx = self.model.images.index(image) \
+            if image in self.model.images else -1
+        # If the generated image is the one on screen, show the comparison now.
+        if all_idx == self._current_image_index:
+            self._show_comparison(image.path, Path(path))
+
+    def _on_generation_finished(self):
+        self.generate_progress.setVisible(False)
+        self.generate_cancel_btn.setVisible(False)
+        self.generate_current_btn.setEnabled(True)
+        self.generate_selected_btn.setEnabled(True)
+        self.generate_all_btn.setEnabled(True)
+        self._gen_worker = None
+        from ltd.utils.sound import play_completion_sound
+        play_completion_sound()
+
+    def _on_generation_error(self, msg):
+        QMessageBox.critical(self, 'Generation Error', msg)
+
+    def _show_comparison(self, original_path: Path, generated_path: Path):
+        """Show the original (full resolution) beside/above the generated
+        render. Landscape originals stack top/bottom; square/portrait sit
+        left/right."""
+        # Reuse the cached full-res original if present (from viewing/preload),
+        # else load it full-res — the original must not be shown downscaled.
+        key = str(original_path)
+        orig = self._pixmap_cache.get(key)
+        if orig is None:
+            orig = load_pixmap(original_path)
+            if orig is not None:
+                self._pixmap_cache[key] = orig
+                self._pixmap_cache.move_to_end(key)
+                while len(self._pixmap_cache) > self._PIXMAP_CACHE_MAX:
+                    self._pixmap_cache.popitem(last=False)
+        gen = load_pixmap(generated_path)
+        if gen is None:
+            # Generated render unreadable — just show the original.
+            self.image_viewer.load_image(orig)
+            return
+        if orig is None:
+            self.image_viewer.load_image(gen)
+            return
+        stack_vertical = orig.width() > orig.height()  # landscape → top/bottom
+        self.image_viewer.load_comparison(orig, gen, stack_vertical)
 
     # ------------------------------------------------------------------
     # Find & Replace

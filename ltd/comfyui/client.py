@@ -39,6 +39,18 @@ class ComfyUIClient:
                               files=files, data=data, timeout=30)
             return r.json()
 
+    def free(self, unload_models: bool = True,
+             free_memory: bool = True) -> bool:
+        """Ask ComfyUI to drop models/cache from VRAM (best-effort)."""
+        try:
+            r = requests.post(
+                f'{self.base_url}/free',
+                json={'unload_models': unload_models,
+                      'free_memory': free_memory}, timeout=30)
+            return r.status_code == 200
+        except requests.RequestException:
+            return False
+
     def queue_prompt(self, workflow: dict) -> str:
         """Queue a workflow and return the prompt_id."""
         payload = {'prompt': workflow, 'client_id': self.client_id}
@@ -71,17 +83,23 @@ class ComfyUIClient:
         r = requests.get(f'{self.base_url}/history/{prompt_id}', timeout=30)
         return r.json().get(prompt_id, {})
 
-    def get_output_files(self, history: dict) -> list[str]:
-        """Extract output filenames from history."""
+    def get_output_files(self, history: dict) -> list[dict]:
+        """Extract output image/gif refs from history.
+
+        Returns dicts with 'filename', 'subfolder' and 'type' — the subfolder
+        matters because a SaveImage 'filename_prefix' like 'folder/name' writes
+        into a subfolder, and /view needs it to locate the file.
+        """
         files = []
         outputs = history.get('outputs', {})
         for node_id, node_output in outputs.items():
-            if 'images' in node_output:
-                for img in node_output['images']:
-                    files.append(img['filename'])
-            if 'gifs' in node_output:
-                for gif in node_output['gifs']:
-                    files.append(gif['filename'])
+            for key in ('images', 'gifs'):
+                for item in node_output.get(key, []):
+                    files.append({
+                        'filename': item['filename'],
+                        'subfolder': item.get('subfolder', ''),
+                        'type': item.get('type', 'output'),
+                    })
         return files
 
     def get_output_text(self, history: dict) -> list[str]:
@@ -94,10 +112,12 @@ class ComfyUIClient:
         return texts
 
     def download_output(self, filename: str, dest_dir: Path,
-                        subfolder: str = '') -> Path:
-        """Download an output file from ComfyUI."""
-        params = {'filename': filename, 'subfolder': subfolder, 'type': 'output'}
+                        subfolder: str = '', file_type: str = 'output') -> Path:
+        """Download an output file from ComfyUI (raises on HTTP error)."""
+        params = {'filename': filename, 'subfolder': subfolder,
+                  'type': file_type}
         r = requests.get(f'{self.base_url}/view', params=params, timeout=60)
+        r.raise_for_status()
         dest = dest_dir / filename
         dest.write_bytes(r.content)
         return dest
@@ -111,8 +131,10 @@ class ComfyUIClient:
         history = self.wait_for_completion(prompt_id)
 
         files = []
-        for filename in self.get_output_files(history):
-            path = self.download_output(filename, output_dir)
+        for ref in self.get_output_files(history):
+            path = self.download_output(
+                ref['filename'], output_dir,
+                subfolder=ref['subfolder'], file_type=ref['type'])
             files.append(path)
 
         texts = self.get_output_text(history)

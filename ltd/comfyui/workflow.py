@@ -7,6 +7,9 @@ import requests
 # Expected node title prefixes for LTD integration
 LTD_INPUT_IMAGE = 'LTD_Input_Image'
 LTD_INPUT_MASK = 'LTD_Input_Mask'
+LTD_INPUT_TEXT = 'LTD_Input_Text'
+LTD_LATENT_SIZE = 'LTD_Latent_Size'
+LTD_SEED = 'LTD_Seed'
 LTD_OUTPUT_IMAGE = 'LTD_Output_Image'
 LTD_OUTPUT_MASK = 'LTD_Output_Mask'
 LTD_OUTPUT_TEXT = 'LTD_Output_Text'
@@ -240,10 +243,56 @@ def validate_caption_workflow(workflow: dict) -> tuple[bool, str]:
     return True, 'OK'
 
 
+def validate_generation_workflow(workflow: dict) -> tuple[bool, str]:
+    """Validate a workflow for text-to-image generation from a caption.
+
+    Requires: LTD_Input_Text (prompt), LTD_Latent_Size (output dimensions),
+    LTD_Output_Image (generated image).
+    """
+    if not is_api_format(workflow):
+        if _is_ui_format(workflow):
+            return False, ('Workflow is in UI format and auto-conversion '
+                           'failed. In ComfyUI: Settings → Enable Dev '
+                           'Mode Options → use "Save (API Format)" button')
+        return False, 'Workflow is not in valid ComfyUI format'
+
+    if not find_nodes_by_title(workflow, LTD_INPUT_TEXT):
+        return False, f'Missing node with title "{LTD_INPUT_TEXT}"'
+    if not find_nodes_by_title(workflow, LTD_LATENT_SIZE):
+        return False, f'Missing node with title "{LTD_LATENT_SIZE}"'
+    if not find_nodes_by_title(workflow, LTD_OUTPUT_IMAGE):
+        return False, f'Missing node with title "{LTD_OUTPUT_IMAGE}"'
+
+    return True, 'OK'
+
+
 def set_input_image(workflow: dict, image_filename: str):
     """Set the input image filename in the workflow."""
     for node_id in find_nodes_by_title(workflow, LTD_INPUT_IMAGE):
         workflow[node_id]['inputs']['image'] = image_filename
+
+
+def set_input_text(workflow: dict, text: str):
+    """Set the prompt text on all LTD_Input_Text nodes."""
+    for node_id in find_nodes_by_title(workflow, LTD_INPUT_TEXT):
+        workflow[node_id]['inputs']['text'] = text
+
+
+def set_latent_size(workflow: dict, width: int, height: int):
+    """Set width/height on all LTD_Latent_Size nodes (literal overrides links)."""
+    for node_id in find_nodes_by_title(workflow, LTD_LATENT_SIZE):
+        inputs = workflow[node_id]['inputs']
+        inputs['width'] = int(width)
+        inputs['height'] = int(height)
+
+
+def set_seed(workflow: dict, seed: int):
+    """Pin the seed on all LTD_Seed nodes (avoids -1 server-side randomize)."""
+    for node_id in find_nodes_by_title(workflow, LTD_SEED):
+        inputs = workflow[node_id]['inputs']
+        keys = [k for k in ('seed', 'noise_seed') if k in inputs] or ['seed']
+        for key in keys:
+            inputs[key] = int(seed)
 
 
 def set_input_mask(workflow: dict, mask_filename: str):

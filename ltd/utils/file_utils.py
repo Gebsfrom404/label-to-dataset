@@ -25,11 +25,16 @@ def get_temp_dir_no_clear(subdir: str) -> Path:
 
 
 def cleanup_all_temp():
-    """Remove all temp data on exit, preserving persistent label dirs."""
+    """Remove all temp data on exit, preserving persistent caches.
+
+    Preserved: ``labels_*`` (YOLO labels) and ``generated_*`` (caption-tab
+    generated-image comparison cache) — both keyed by source-folder hash so
+    they survive restarts.
+    """
     if not _TEMP_ROOT.exists():
         return
     for child in _TEMP_ROOT.iterdir():
-        if child.name.startswith('labels_'):
+        if child.name.startswith(('labels_', 'generated_')):
             continue
         if child.is_dir():
             shutil.rmtree(child, ignore_errors=True)

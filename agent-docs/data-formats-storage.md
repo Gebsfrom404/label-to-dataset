@@ -102,10 +102,14 @@ Tags loaded from `autocompletions/` directory by `ltd/data/tag_dictionary.py`:
 ```python
 get_temp_dir(subdir)          # Create temp dir, CLEAR existing contents
 get_temp_dir_no_clear(subdir) # Create temp dir, KEEP existing contents
-cleanup_all_temp()            # On exit: remove all except labels_* dirs
+cleanup_all_temp()            # On exit: remove all except labels_* and generated_* dirs
 ```
 
 Root: `{tempdir}/label-to-dataset/`
+
+### Generated-image comparison cache (`generated_*`)
+
+The Caption tab's "Compare original image to generated from caption" tool renders a caption via ComfyUI and caches the result at `{tempdir}/label-to-dataset/generated_{md5(folder)[:12]}/`, keyed by the loaded folder path (same hashing scheme as `labels_*`). Filenames come from `caption_tab.generated_cache_name(image)` — the image's relative path with unsafe chars replaced, `.png` extension — so images with the same stem in different subfolders don't collide. Never written into the source folder. `cleanup_all_temp()` preserves these dirs so comparisons survive restarts.
 
 ## Settings Persistence
 
