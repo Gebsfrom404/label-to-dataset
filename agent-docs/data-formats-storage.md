@@ -77,7 +77,7 @@ Plain `.txt` files with tags, stored alongside images.
 
 The right-panel header has a **Tags / Caption** dropdown (`panel_mode_combo`, persisted at `caption/panel_mode`). Both modes edit the **same** `.txt` file / `image.tags` — there is no separate caption file. A natural-language caption is simply the file text; tags are that text split on the separator. So the two modes are just alternate *views* of `image.tags`.
 
-The `Image Caption` panel is a tab inside `right_tabs` (a `QPlainTextEdit` named `caption_edit`, inserted at index 0, holding `separator.join(image.tags)`). `_set_caption_mode_tabs(is_caption)` toggles per-tab visibility via `QTabWidget.setTabVisible`:
+The `Image Caption` panel is a tab inside `right_tabs` (a `QPlainTextEdit` named `caption_edit`, inserted at index 0, holding `separator.join(image.tags)`). Above it sits a `caption_search` line edit that highlights all (case-insensitive) matches in the box via `setExtraSelections` (`_update_caption_search_highlights`) — display-only, so it never mutates the document/undo. Re-applied on caption load and on edit, so the term stays sticky across image navigation. `_set_caption_mode_tabs(is_caption)` toggles per-tab visibility via `QTabWidget.setTabVisible`:
 - **Tags** (`_panel_mode == 'tags'`): Image Tags + All Tags visible, Image Caption hidden.
 - **Caption** (`_panel_mode == 'caption'`): Image Caption visible, Image Tags + All Tags hidden.
 - **Auto-Caption** and **Tools** stay visible in both modes (they still write to `image.tags`, so `_on_caption_result` and the snapshot-restore paths call `_sync_caption_view()`).

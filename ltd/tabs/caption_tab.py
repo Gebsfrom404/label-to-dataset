@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtGui import (QBrush, QColor, QImageReader, QKeySequence, QPainter,
-                           QPixmap, QShortcut)
+                           QPixmap, QShortcut, QTextCharFormat)
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox,
                                QComboBox, QDialog, QDialogButtonBox,
                                QDoubleSpinBox,
@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox,
                                QListWidget, QListWidgetItem, QFileDialog,
                                QMenu, QMessageBox, QPlainTextEdit, QProgressBar,
                                QPushButton, QSizePolicy, QSpinBox, QSplitter,
-                               QTabWidget, QVBoxLayout, QWidget)
+                               QTabWidget, QTextEdit, QVBoxLayout, QWidget)
 
 from ltd.comfyui.client import ComfyUIClient
 from ltd.comfyui.workflow import (load_workflow, validate_caption_workflow,
@@ -774,6 +774,8 @@ class CaptionImageViewer(QGraphicsView):
 
 class CaptionTab(QWidget):
     _PIXMAP_CACHE_MAX = 5
+    # Highlight colour for caption search matches (matches the tags-list one).
+    _CAPTION_SEARCH_BRUSH = QColor(255, 200, 50, 110)
     # WD-style taggers shown before the 'ComfyUI Workflow' entry; they share
     # the same settings panel (min probability, max tags, exclude, position).
     _WD_MODELS = (WdTaggerCaptioner, AnimeTimmCaptioner)
@@ -1132,6 +1134,10 @@ class CaptionTab(QWidget):
         # Tools available. Inserted at index 0 so it leads in Caption mode.
         self.caption_panel = QWidget()
         cap_panel_layout = QVBoxLayout(self.caption_panel)
+        self.caption_search = QLineEdit()
+        self.caption_search.setPlaceholderText('Highlight in caption...')
+        self.caption_search.setClearButtonEnabled(True)
+        cap_panel_layout.addWidget(self.caption_search)
         self.caption_edit = QPlainTextEdit()
         self.caption_edit.setPlaceholderText(
             'Natural-language caption for this image...')
@@ -1216,6 +1222,8 @@ class CaptionTab(QWidget):
             self._on_panel_mode_changed)
         self.caption_edit.textChanged.connect(self._on_caption_text_changed)
         self._caption_debounce.timeout.connect(self._commit_caption_edit)
+        self.caption_search.textChanged.connect(
+            self._update_caption_search_highlights)
 
         # All tags
         self.all_tags_filter.textChanged.connect(self._update_all_tags_display)
@@ -1478,6 +1486,24 @@ class CaptionTab(QWidget):
         self._loading_caption = False
         self._pre_tags_snapshot = list(image.tags) if image is not None else None
         self._update_token_count()
+        self._update_caption_search_highlights()
+
+    def _update_caption_search_highlights(self):
+        """Highlight every occurrence of the search string in the caption box."""
+        needle = self.caption_search.text()
+        selections = []
+        if needle:
+            fmt = QTextCharFormat()
+            fmt.setBackground(self._CAPTION_SEARCH_BRUSH)
+            doc = self.caption_edit.document()
+            cursor = doc.find(needle)  # case-insensitive by default
+            while not cursor.isNull():
+                sel = QTextEdit.ExtraSelection()
+                sel.format = fmt
+                sel.cursor = cursor
+                selections.append(sel)
+                cursor = doc.find(needle, cursor)
+        self.caption_edit.setExtraSelections(selections)
 
     def _sync_caption_view(self):
         """Reload the caption box from the current image (caption mode only)."""
@@ -1489,6 +1515,7 @@ class CaptionTab(QWidget):
         if self._loading_caption:
             return
         self._update_token_count()
+        self._update_caption_search_highlights()
         self._caption_debounce.start()
 
     def _commit_caption_edit(self):
