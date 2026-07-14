@@ -73,6 +73,17 @@ Plain `.txt` files with tags, stored alongside images.
 - Undo/redo per-image (Ctrl+Z / Ctrl+Y) with snapshot-based stacks
 - Tag dictionary from `autocompletions/` folder provides autocomplete and category colors
 
+### Zip Selected (Tools tab)
+
+`_zip_selected()` (Caption tab → Tools) archives the selected images plus their caption `.txt` files into a **flat** `.zip` (no folders). Flushes pending edits via `_save_current_tags()`, builds the `(source → flat name)` mapping, resolves the tar binary, prompts with `QFileDialog.getSaveFileName` (forces `.zip` suffix), then hands the work to `ZipWorker` (`ltd/workers/zip_worker.py`) driven by a `loading_dialog` + local `QEventLoop` so the UI stays responsive (see [workers-threading.md](workers-threading.md)).
+
+**Flat naming + conflict resolution** (in `_zip_selected`): one stem is resolved per image so its image and caption stay paired. First use of a basename keeps the original; later collisions become `N_<stem>` (`cat.png`→`1_cat.png`, and its caption `1_cat.txt`).
+
+**`ZipWorker.do_work()`** stages each mapped file into `get_temp_dir('zip_staging')` under its flat name via `os.link` (hardlink — instant, no extra disk) with a `shutil.copy2` fallback (cross-volume / no-hardlink FS), emitting `progress`, then runs tar and rmtree's the staging dir in `finally`. tar gotchas baked in:
+- **tar binary** (`CaptionTab._resolve_tar()`, passed to the worker): on Windows tries `Sysnative\tar.exe` then `System32\tar.exe` (bsdtar) before `shutil.which('tar')`. `Sysnative` handles WOW64 redirection for a 32-bit Python; the explicit path avoids a GNU `tar` on PATH (from Git) that would silently write a *tar* with a `.zip` name instead of a real zip.
+- **Command-line length**: flat member names go in a `-T` list file inside the staging dir, not on the command line — a large selection would overflow the ~32 KB Windows limit (`WinError 206`). Invoked as `tar -a -c -f <dest> -C <staging> -T <list>` (`-a` picks zip format from the `.zip` extension).
+- **Non-ASCII filenames**: the `-T` list is written in `mbcs` (OS code page) on Windows, because bsdtar decodes it with the code page, not UTF-8 — otherwise Cyrillic etc. names fail with "Couldn't visit directory".
+
 ### Tags vs Caption view mode
 
 The right-panel header has a **Tags / Caption** dropdown (`panel_mode_combo`, persisted at `caption/panel_mode`). Both modes edit the **same** `.txt` file / `image.tags` — there is no separate caption file. A natural-language caption is simply the file text; tags are that text split on the separator. So the two modes are just alternate *views* of `image.tags`.
