@@ -1,13 +1,15 @@
 """Caption tab: tag editing and auto-captioning (adapted from taggui)."""
 import csv
+import os
 import re
 import shutil
+import sys
 from collections import OrderedDict
 from fnmatch import fnmatchcase
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import Qt, QThread, QTimer, Signal
+from PySide6.QtCore import Qt, QEventLoop, QThread, QTimer, Signal
 from PySide6.QtGui import (QBrush, QColor, QImageReader, QKeySequence, QPainter,
                            QPixmap, QShortcut, QTextCharFormat)
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox,
@@ -40,6 +42,7 @@ from ltd.widgets.tag_completer_popup import TagCompleterPopup
 from ltd.widgets.workflow_selector import WorkflowSelector
 from ltd.workers.caption_worker import CaptionWorker
 from ltd.workers.generation_worker import GenerationWorker
+from ltd.workers.zip_worker import ZipWorker
 
 
 # ---------------------------------------------------------------------------
@@ -1091,7 +1094,12 @@ class CaptionTab(QWidget):
         self.reload_autocompletions_btn.setToolTip(
             'Reload tag dictionary from autocompletions/ folder')
         tools_row3.addWidget(self.reload_autocompletions_btn)
-        tools_row3.addStretch()
+
+        self.zip_selected_btn = QPushButton('Zip Selected Images')
+        self.zip_selected_btn.setToolTip(
+            'Save the selected images and their caption .txt files '
+            'to a .zip archive')
+        tools_row3.addWidget(self.zip_selected_btn)
         tools_layout.addLayout(tools_row3)
 
         # ---- Compare original image to generated from caption ----
@@ -1274,6 +1282,7 @@ class CaptionTab(QWidget):
             self._remove_duplicates_all)
         self.reload_autocompletions_btn.clicked.connect(
             self._reload_autocompletions)
+        self.zip_selected_btn.clicked.connect(self._zip_selected)
 
         # Save / separator
         self.save_captions_btn.clicked.connect(self._save_all_captions)
@@ -1751,6 +1760,130 @@ class CaptionTab(QWidget):
         count = len(self._tag_dict._tags) if self._tag_dict.is_loaded() else 0
         self.caption_status.setText(
             f'Reloaded autocompletions ({count} tags)')
+
+    def _zip_selected(self):
+        """Zip the selected images and their caption .txt files.
+
+        The archive is flat (no folders): each image and its caption go in
+        at the top level. Basename conflicts across source folders are
+        resolved as ``N_<original name>`` while keeping an image and its
+        caption on the same stem. Staging + tar run on a worker thread with
+        a loading dialog so the UI stays responsive.
+        """
+        # Flush any pending caption edit so the archive holds the latest text.
+        self._save_current_tags()
+
+        images = self.image_list.get_selected_images()
+        if not images:
+            QMessageBox.information(self, 'Info', 'No images selected.')
+            return
+
+        # Build the flat (source -> archive name) mapping. Resolve stem
+        # collisions once per image so its image + caption share the stem.
+        mapping: list[tuple[Path, str]] = []
+        used_stems: set[str] = set()
+        for image in images:
+            img_path = image.path
+            caption_path = image.caption_path
+            has_img = img_path.exists()
+            has_caption = caption_path.exists()
+            if not has_img and not has_caption:
+                continue
+
+            stem = img_path.stem
+            unique = stem
+            n = 1
+            while unique in used_stems:
+                unique = f'{n}_{stem}'
+                n += 1
+            used_stems.add(unique)
+
+            if has_img:
+                mapping.append((img_path, unique + img_path.suffix))
+            if has_caption:
+                mapping.append((caption_path, unique + caption_path.suffix))
+
+        if not mapping:
+            QMessageBox.warning(
+                self, 'Warning', 'No files found on disk for the selection.')
+            return
+
+        # On Windows resolve the bundled bsdtar explicitly: a plain 'tar' on
+        # PATH may be GNU tar (e.g. from Git), which can't write zip and would
+        # silently produce a tar file with a .zip name.
+        tar_exe = self._resolve_tar()
+        if tar_exe is None:
+            QMessageBox.critical(
+                self, 'Error',
+                "Could not find a 'tar' executable.\n\n"
+                "Windows 10/11 ships tar at "
+                r"C:\Windows\System32\tar.exe — make sure it exists and is "
+                "on PATH.")
+            return
+
+        default_dir = str(images[0].path.parent)
+        dest, _ = QFileDialog.getSaveFileName(
+            self, 'Zip Selected', str(Path(default_dir) / 'dataset.zip'),
+            'Zip archives (*.zip)')
+        if not dest:
+            return
+        dest_path = Path(dest)
+        if dest_path.suffix.lower() != '.zip':
+            dest_path = dest_path.with_suffix('.zip')
+
+        # tar refuses to overwrite in place cleanly on some platforms; remove
+        # any existing archive first so a re-zip to the same name succeeds.
+        if dest_path.exists():
+            try:
+                dest_path.unlink()
+            except OSError as exc:
+                QMessageBox.critical(
+                    self, 'Error',
+                    f'Could not overwrite existing archive:\n{exc}')
+                return
+
+        staging_dir = get_temp_dir('zip_staging')
+
+        worker = ZipWorker(mapping, dest_path, tar_exe, staging_dir, self)
+        self._zip_error = None
+        worker.error.connect(lambda m: setattr(self, '_zip_error', m))
+        with loading_dialog('Zipping selected files...', self) as dlg:
+            dlg.set_progress(0, len(mapping))
+            loop = QEventLoop()
+            worker.progress.connect(dlg.set_progress)
+            worker.status.connect(dlg.set_message)
+            worker.finished_work.connect(loop.quit)
+            worker.start()
+            loop.exec()
+            worker.wait()
+
+        if self._zip_error:
+            QMessageBox.critical(self, 'Error', self._zip_error)
+            return
+
+        self.caption_status.setText(
+            f'Zipped {len(images)} image(s) to {dest_path.name}')
+
+    @staticmethod
+    def _resolve_tar():
+        """Locate a tar executable, preferring the OS-bundled bsdtar.
+
+        Returns the path/name to invoke, or None if nothing usable is found.
+        On Windows the search order avoids GNU tar (which cannot write zip)
+        and works around WOW64 redirection: a 32-bit Python process sees
+        ``System32`` redirected to ``SysWOW64`` (no tar.exe there), so
+        ``Sysnative`` — the alias to the real System32 — is tried first.
+        """
+        if sys.platform == 'win32':
+            root = os.environ.get('SystemRoot', r'C:\Windows')
+            for sub in ('Sysnative', 'System32'):
+                candidate = Path(root) / sub / 'tar.exe'
+                if candidate.exists():
+                    return str(candidate)
+        found = shutil.which('tar')
+        if found:
+            return found
+        return None
 
     # ------------------------------------------------------------------
     # Image selection
