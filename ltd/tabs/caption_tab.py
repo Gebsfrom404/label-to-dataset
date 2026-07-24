@@ -1136,6 +1136,62 @@ class CaptionTab(QWidget):
         tools_layout.addStretch()
         self.right_tabs.addTab(tools_tab, 'Tools')
 
+        # ---- Tab: Fast Insertion ----
+        # Ten editable tag slots mapped to number keys 1..9,0. When enabled,
+        # pressing a slot's number key (or clicking its button) appends or
+        # prepends that tag to the selected images — or the current image if
+        # none are selected — exactly like the context-menu paste. Works in
+        # both Tags and Caption modes since both are views of image.tags, so a
+        # prepend/append on the list becomes "tag, " / ", tag" when joined.
+        fast_tab = QWidget()
+        fast_layout = QVBoxLayout(fast_tab)
+
+        fast_top = QHBoxLayout()
+        self.fast_insert_enable = QCheckBox('Enable')
+        self.fast_insert_enable.setToolTip(
+            'Enable the number-key shortcuts (1..9, 0) for fast tag '
+            'insertion.\nThe slot buttons always work; only the keyboard '
+            'shortcuts are gated by this checkbox.')
+        fast_top.addWidget(self.fast_insert_enable)
+        fast_top.addSpacing(12)
+        fast_top.addWidget(QLabel('Mode:'))
+        self.fast_insert_mode = QComboBox()
+        self.fast_insert_mode.addItems(['Append', 'Prepend'])
+        self.fast_insert_mode.setToolTip(
+            'Append: add the tag at the end (", tag").\n'
+            'Prepend: add the tag at the start ("tag, ").')
+        fast_top.addWidget(self.fast_insert_mode)
+        fast_top.addStretch()
+        fast_layout.addLayout(fast_top)
+
+        fast_help = QLabel(
+            'Press a number key (or click its button) to add that slot\'s tag '
+            'to the selected images — or the current image if none are '
+            'selected.')
+        fast_help.setWordWrap(True)
+        fast_layout.addWidget(fast_help)
+
+        self.fast_insert_inputs: list[QLineEdit] = []
+        self.fast_insert_buttons: list[QPushButton] = []
+        for i in range(10):
+            key_label = str((i + 1) % 10)  # 1,2,...,9,0
+            slot_row = QHBoxLayout()
+            btn = QPushButton(key_label)
+            btn.setFixedWidth(32)
+            btn.setToolTip(f'Insert slot {key_label}')
+            btn.clicked.connect(
+                lambda checked=False, idx=i: self._fast_insert(idx))
+            slot_row.addWidget(btn)
+            edit = QLineEdit()
+            edit.setPlaceholderText(f'Tag for key {key_label}...')
+            slot_row.addWidget(edit)
+            fast_layout.addLayout(slot_row)
+            self.fast_insert_inputs.append(edit)
+            self.fast_insert_buttons.append(btn)
+
+        fast_layout.addStretch()
+        self.right_tabs.addTab(fast_tab, 'Fast Insertion')
+
         # ---- Tab: Image Caption (natural language) ----
         # Sits inside the same tab widget; the Tags/Caption dropdown swaps it
         # in for the Image Tags + All Tags tabs while keeping Auto-Caption and
@@ -1225,6 +1281,10 @@ class CaptionTab(QWidget):
         # Image viewer navigation
         self.image_viewer.navigate_image.connect(self._on_page_navigate)
 
+        # Fast insertion — enable toggle drives the number-key shortcuts.
+        self.fast_insert_enable.toggled.connect(
+            self._on_fast_insert_enabled_changed)
+
         # Panel mode (Tags / Caption) + caption editing
         self.panel_mode_combo.currentIndexChanged.connect(
             self._on_panel_mode_changed)
@@ -1292,6 +1352,7 @@ class CaptionTab(QWidget):
     def _build_shortcuts_help(self) -> str:
         from ltd.widgets.info_button import focus_in
         from ltd.widgets.info_text import (CAPTION_SHORTCUTS_BULK,
+                                            CAPTION_SHORTCUTS_FAST_INSERT,
                                             CAPTION_SHORTCUTS_GLOBAL,
                                             CAPTION_SHORTCUTS_INPUT,
                                             CAPTION_SHORTCUTS_NAV,
@@ -1308,6 +1369,8 @@ class CaptionTab(QWidget):
                         CAPTION_SHORTCUTS_INPUT,
                         CAPTION_SHORTCUTS_NAV]
         sections.append(CAPTION_SHORTCUTS_BULK)
+        if self.fast_insert_enable.isChecked():
+            sections.append(CAPTION_SHORTCUTS_FAST_INSERT)
         sections.append(CAPTION_SHORTCUTS_GLOBAL)
         return '<br>'.join(sections)
 
@@ -1356,6 +1419,21 @@ class CaptionTab(QWidget):
         pgdn_sc = QShortcut(QKeySequence('PgDown'), self)
         pgdn_sc.activated.connect(lambda: self._on_page_navigate(1))
 
+        # Fast insertion: number keys 1..9,0 → slots 0..9. Disabled outright
+        # until the Enable checkbox turns them on, so digits type normally
+        # otherwise. WidgetWithChildrenShortcut confines them to this tab, and
+        # QLineEdit/QPlainTextEdit send ShortcutOverride for digit keys, so
+        # typing digits in any text field (tag input, caption box, filters)
+        # is never swallowed even while enabled.
+        self._fast_insert_shortcuts: list[QShortcut] = []
+        for i in range(10):
+            key = str((i + 1) % 10)
+            sc = QShortcut(QKeySequence(key), self)
+            sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            sc.activated.connect(lambda idx=i: self._fast_insert(idx))
+            sc.setEnabled(False)
+            self._fast_insert_shortcuts.append(sc)
+
     def _navigate_previous(self):
         focus = QApplication.focusWidget()
         if isinstance(focus, (QLineEdit, QPlainTextEdit)):
@@ -1400,6 +1478,14 @@ class CaptionTab(QWidget):
         saved_model = s.value('caption/lmstudio_model', '', type=str)
         if saved_model:
             self.lmstudio_model_combo.setCurrentText(saved_model)
+        # Fast insertion (tags first, then mode, then enable — enable toggles
+        # the shortcuts, so it must be applied last).
+        for i, edit in enumerate(self.fast_insert_inputs):
+            edit.setText(s.value(f'caption/fast_insert_tag_{i}', '', type=str))
+        self.fast_insert_mode.setCurrentIndex(
+            s.value('caption/fast_insert_mode', 0, type=int))
+        self.fast_insert_enable.setChecked(
+            s.value('caption/fast_insert_enabled', False, type=bool))
         # Applies visibility via _on_panel_mode_changed (only fires if the
         # stored index differs from the combo's current 0).
         self.panel_mode_combo.setCurrentIndex(
@@ -1431,6 +1517,14 @@ class CaptionTab(QWidget):
                 self.lmstudio_system_prompt.toPlainText()))
         self.lmstudio_append_check.toggled.connect(
             lambda v: self._save_setting('lmstudio_append', v))
+        # Fast insertion (enable persistence lives in its toggle handler)
+        self.fast_insert_mode.currentIndexChanged.connect(
+            lambda v: self._save_setting('fast_insert_mode', v))
+        for i, edit in enumerate(self.fast_insert_inputs):
+            edit.editingFinished.connect(
+                lambda idx=i: self._save_setting(
+                    f'fast_insert_tag_{idx}',
+                    self.fast_insert_inputs[idx].text()))
 
     def _get_separator(self) -> str:
         """Read separator from input, decode escape sequences."""
@@ -2063,6 +2157,68 @@ class CaptionTab(QWidget):
         action = 'Pasted' if tags else 'Cleared'
         self.caption_status.setText(
             f'{action} tags on {len(source_rows)} image(s)')
+
+    # ------------------------------------------------------------------
+    # Fast insertion
+    # ------------------------------------------------------------------
+
+    def _on_fast_insert_enabled_changed(self, checked: bool):
+        """Enable/disable the number-key shortcuts and persist the state."""
+        for sc in self._fast_insert_shortcuts:
+            sc.setEnabled(checked)
+        self._save_setting('fast_insert_enabled', checked)
+
+    def _fast_insert(self, slot: int):
+        """Append/prepend a fast-insertion slot's tag to the target images.
+
+        Targets the selected images, or the current image if none are
+        selected — mirroring the context-menu paste (`_on_tags_pasted`).
+        """
+        if slot < 0 or slot >= len(self.fast_insert_inputs):
+            return
+        tag = self.fast_insert_inputs[slot].text().strip()
+        key_label = str((slot + 1) % 10)
+        if not tag:
+            self.caption_status.setText(
+                f'Fast insertion slot {key_label} is empty')
+            return
+
+        rows = self.image_list.selected_source_rows()
+        if not rows and self._current_image_index >= 0:
+            rows = [self._current_image_index]
+        if not rows:
+            return
+
+        # Flush any pending edit on the current image before mutating tags.
+        self._save_current_tags()
+
+        prepend = self.fast_insert_mode.currentIndex() == 1
+        bid = self._new_batch_id() if len(rows) > 1 else None
+        for row in rows:
+            image = self.model.get_image(row)
+            if image is None:
+                continue
+            self._push_undo(row, list(image.tags), bid)
+            if prepend:
+                image.tags = [tag] + image.tags
+            else:
+                image.tags = image.tags + [tag]
+            self._auto_save_image(image)
+
+        # Refresh current image display if it was affected.
+        if self._current_image_index in rows:
+            image = self.model.get_image(self._current_image_index)
+            if image:
+                self._pre_tags_snapshot = list(image.tags)
+                self._skip_snapshot = True
+                self.tags_list.set_tags(image.tags)
+                self._skip_snapshot = False
+                self._sync_caption_view()
+                self._update_token_count()
+        self._rebuild_all_tags()
+        where = 'Prepended' if prepend else 'Appended'
+        self.caption_status.setText(
+            f'{where} "{tag}" to {len(rows)} image(s)')
 
     # ------------------------------------------------------------------
     # Tag editing (current image)

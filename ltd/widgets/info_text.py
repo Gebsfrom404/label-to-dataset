@@ -187,6 +187,11 @@ CAPTION_SHORTCUTS_NAV = _section('Image navigation', [
     ('Left / Right', 'Previous / next image'),
     ('PgUp / PgDown', 'Previous / next image'),
 ])
+CAPTION_SHORTCUTS_FAST_INSERT = _section('Fast insertion', [
+    ('1 2 3 … 9 0', 'Add slot tag to selected (or current) image(s)'),
+    ('Enable', 'Toggle the number-key shortcuts on/off'),
+    ('Mode', 'Append (", tag") or prepend ("tag, ")'),
+])
 
 
 GEN_SHORTCUTS_LIST = _section('Image list', [

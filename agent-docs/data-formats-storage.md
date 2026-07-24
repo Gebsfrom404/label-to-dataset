@@ -93,6 +93,16 @@ The `Image Caption` panel is a tab inside `right_tabs` (a `QPlainTextEdit` named
 - **Caption** (`_panel_mode == 'caption'`): Image Caption visible, Image Tags + All Tags hidden.
 - **Auto-Caption** and **Tools** stay visible in both modes (they still write to `image.tags`, so `_on_caption_result` and the snapshot-restore paths call `_sync_caption_view()`).
 
+### Fast Insertion tab
+
+A `Fast Insertion` tab in `right_tabs` holds ten editable tag slots (`fast_insert_inputs`) mapped to number keys `1..9,0` (slot index `i` → key `str((i+1)%10)`). Each slot has a button (`fast_insert_buttons`) that always inserts on click, plus a `QLineEdit`. An **Enable** checkbox (`fast_insert_enable`) gates only the keyboard shortcuts, and a **Mode** combo (`fast_insert_mode`) picks Append vs Prepend.
+
+`_fast_insert(slot)` mirrors the context-menu paste (`_on_tags_pasted`): it targets `selected_source_rows()`, falling back to the current image; flushes pending edits with `_save_current_tags()`; then per row pushes undo (batched when >1) and does `image.tags = [tag] + tags` (prepend) or `tags + [tag]` (append), auto-saving each. Because captions are just `separator.join(image.tags)`, prepend/append become `"tag, "` / `", tag"` for free — works in both Tags and Caption modes (calls `_sync_caption_view()`). No dedup, matching paste semantics.
+
+Ten `QShortcut`s (context `WidgetWithChildrenShortcut`) are created disabled; `_on_fast_insert_enabled_changed` toggles their `setEnabled` with the checkbox, so digits type normally when off. While on, `QLineEdit`/`QPlainTextEdit` emit ShortcutOverride for digit keys, so typing in text fields is never swallowed. Persisted at `caption/fast_insert_enabled`, `caption/fast_insert_mode`, `caption/fast_insert_tag_{0..9}`. The tab stays visible in both panel modes (only Image Tags/All Tags/Image Caption are toggled by `_set_caption_mode_tabs`).
+
+### Tags vs Caption shared machinery
+
 Because both views share `image.tags`, auto-save, snapshots, and export work unchanged. Key sync points in `caption_tab.py`:
 - `_save_current_tags()` is **mode-aware**: in caption mode it delegates to `_commit_caption_edit()` (which parses the box via `_parse_caption_text()`, pushes undo, autosaves, rebuilds all-tags). This is the single flush called before navigation and every bulk op.
 - `caption_edit.textChanged` → 400 ms debounce (`_caption_debounce`) → `_commit_caption_edit()`. `_loading_caption` guards programmatic `setPlainText`.
