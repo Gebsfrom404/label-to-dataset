@@ -77,6 +77,37 @@ The canvas emits `split_pos_changed(float)` when the user drags the split divide
 
 ModifyTab defines `_TOOL_CROP = 'crop'`, `_TOOL_SPLIT_V = 'split_v'`, `_TOOL_SPLIT_H = 'split_h'` as plain string constants. These are NOT members of the canvas `Tool` enum. ModifyTab manages them alongside actual `Tool` enum values in its own `QButtonGroup`. When adding new tools to ModifyTab, use the same string-constant pattern.
 
+## Deleting an Image — Cached Row Index Goes Stale
+
+`QItemSelectionModel` relocates the current index **during** `beginRemoveRows` (before the item is popped), landing on `row - 1`, or `row + 1` when deleting row 0. Two consequences:
+
+1. `current_changed` fires against the **pre-removal** model.
+2. Its stored index is persistent, so after the pop it may already sit on the row you were about to select — `setCurrentIndex()` then emits nothing, and a tab's cached `_current_image_index` keeps its pre-removal value.
+
+Symptom: the canvas shows the right image, but every `self.model.get_image(self._current_image_index)` (mask save, crop, split, label edits) hits the **neighbouring** image.
+
+Pattern used by `LabelTab._delete_current_image` / `ModifyTab._delete_current_image`:
+
+```python
+self.image_list.blockSignals(True)   # suppress the mid-removal callback
+try:
+    self.model.remove_rows([row])
+finally:
+    self.image_list.blockSignals(False)
+self._current_image_index = -1       # force the resync to be detectable
+new_row = self.image_list.select_proxy_row(new_proxy_row)  # or select_index()
+if self._current_image_index != new_row:
+    self._on_image_changed(new_row)  # select_*() was a no-op — resync by hand
+```
+
+`CaptionTab._on_images_deleted` achieves the same by re-reading `current_source_row()` after the removal and calling `_on_image_changed` explicitly.
+
+Related: with a filter proxy (Label / Caption / Gen lists), the next **source** row may be hidden. Pick the next row in *proxy* space instead — `LabelImageList.current_proxy_row()` / `select_proxy_row()`.
+
+## Per-Image State Keyed by Row Breaks on Deletion
+
+`LabelTab._undo_stacks` and `CaptionTab._undo_stacks` / `_redo_stacks` are `dict[row_index, ...]`. Removing a row shifts every later image down one, so the stacks silently attach to the wrong images. `LabelTab._delete_current_image` remaps them (`{i - 1 if i > row else i}`); **CaptionTab does not** — its delete path leaves undo history misaligned. ModifyTab sidesteps this entirely by keying `_image_histories` on `id(image)`.
+
 ## ModificationWorker — Module Unload
 
 After batch modification completes (or is cancelled), the worker calls `module.unload()` if it exists. This allows modules to free GPU memory (e.g., LaMa model). The `unload()` method is optional — not part of the ABC.

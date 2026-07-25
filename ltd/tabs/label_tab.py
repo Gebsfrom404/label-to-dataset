@@ -304,6 +304,8 @@ class LabelTab(QWidget):
             self._copy_labels)
         QShortcut(QKeySequence('Ctrl+V'), self).activated.connect(
             self._paste_labels)
+        QShortcut(QKeySequence('Ctrl+Delete'), self).activated.connect(
+            self._delete_current_image)
 
     def _install_space_filter(self):
         """Install event filter on all child widgets to capture spacebar."""
@@ -470,6 +472,66 @@ class LabelTab(QWidget):
             return
         write_yolo_labels(self._label_path_for(image), image.labels)
         self.image_list.reapply_filter()
+
+    def _delete_current_image(self):
+        """Permanently delete the current image and its label files."""
+        row = self.image_list.current_source_row()
+        if row < 0:
+            return
+        image = self.model.get_image(row)
+        if image is None:
+            return
+
+        reply = QMessageBox.question(
+            self, 'Delete Image',
+            f'Permanently delete "{image.filename}" from disk?',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        # Which filtered row to land on afterwards — with a filter active the
+        # next source row may be hidden, so track the position in the view.
+        proxy_row = self.image_list.current_proxy_row()
+
+        for path in (image.path,
+                     self._label_path_for(image) if self._labels_dir else None,
+                     image.path.with_suffix('.txt'),
+                     image.mask_path):
+            if path is None:
+                continue
+            try:
+                if path.exists():
+                    path.unlink()
+            except OSError:
+                pass
+
+        self._pixmap_cache.pop(str(image.path), None)
+        # Undo stacks are keyed by row — shift them to match the new indices.
+        self._undo_stacks.pop(row, None)
+        self._undo_stacks = {(i - 1 if i > row else i): stack
+                             for i, stack in self._undo_stacks.items()}
+
+        # QItemSelectionModel relocates the current index *during*
+        # beginRemoveRows, firing current_changed against the pre-removal
+        # model — and it may land on the row we're about to select, making
+        # select_*() a silent no-op that leaves _current_image_index stale.
+        # Block the signal across the removal and resync explicitly after.
+        self.image_list.blockSignals(True)
+        try:
+            self.model.remove_rows([row])
+        finally:
+            self.image_list.blockSignals(False)
+
+        self._current_image_index = -1
+        new_proxy_row = min(proxy_row, self.image_list.proxy.rowCount() - 1)
+        new_row = self.image_list.select_proxy_row(new_proxy_row)
+        if new_row >= 0:
+            if self._current_image_index != new_row:
+                self._on_image_changed(new_row)
+        else:
+            self.canvas.clear_canvas()
+            self._refresh_labels_list()
 
     def _push_undo(self):
         """Snapshot current image's labels before a mutation."""

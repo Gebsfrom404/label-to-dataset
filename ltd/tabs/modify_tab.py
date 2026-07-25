@@ -333,12 +333,31 @@ class ModifyTab(QWidget):
         self._image_histories.pop(id(image), None)
         # Prevent _on_image_changed from re-saving history for the deleted image
         self._current_image_id = None
+        # Drop cached previews of the now-deleted files
+        self._pixmap_cache.pop(str(image.path), None)
+        if image.modified_path:
+            self._pixmap_cache.pop(str(image.modified_path), None)
 
-        self.model.remove_rows([row])
+        # QItemSelectionModel moves the current index *during* beginRemoveRows
+        # (to row-1, or row+1 when deleting row 0), so it fires current_changed
+        # against the pre-removal list — and afterwards its persistent index may
+        # already sit on new_row, making select_index() a silent no-op. Either
+        # way _current_image_index ends up stale. Block the widget's signal and
+        # resync explicitly once the model has settled.
+        self.image_list.blockSignals(True)
+        try:
+            self.model.remove_rows([row])
+        finally:
+            self.image_list.blockSignals(False)
+
         if self.model.rowCount() > 0:
             new_row = min(row, self.model.rowCount() - 1)
+            self._current_image_index = -1
             self.image_list.select_index(new_row)
+            if self._current_image_index != new_row:
+                self._on_image_changed(new_row)
         else:
+            self._current_image_index = -1
             self._mask_history.clear()
             self._history_pos = -1
             self._sync_history_list()

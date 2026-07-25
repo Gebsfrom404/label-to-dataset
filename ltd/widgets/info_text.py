@@ -132,6 +132,7 @@ LABEL_SHORTCUTS_GLOBAL = _section('Tools', [
     ('S', 'Previous class'),
 ]) + _section('Edit', [
     ('Delete', 'Delete selected label'),
+    ('Ctrl+Delete', 'Delete current image (from disk)'),
     ('Ctrl+Z', 'Undo'),
     ('Ctrl+C', 'Copy labels'),
     ('Ctrl+V', 'Paste labels'),

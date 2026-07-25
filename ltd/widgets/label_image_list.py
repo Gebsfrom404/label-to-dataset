@@ -273,6 +273,26 @@ class LabelImageList(QWidget):
             return self.proxy.mapToSource(current).row()
         return -1
 
+    def current_proxy_row(self) -> int:
+        """Row within the *filtered* view (-1 if nothing current)."""
+        current = self.list_view.currentIndex()
+        return current.row() if current.isValid() else -1
+
+    def select_proxy_row(self, proxy_row: int) -> int:
+        """Select by filtered row; returns the matching source row, or -1.
+
+        Used after a removal, where the source row that should become
+        current depends on what the filter currently shows.
+        """
+        source_row = -1
+        if 0 <= proxy_row < self.proxy.rowCount():
+            proxy_idx = self.proxy.index(proxy_row, 0)
+            self.list_view.setCurrentIndex(proxy_idx)
+            self.list_view.scrollTo(proxy_idx)
+            source_row = self.proxy.mapToSource(proxy_idx).row()
+        self._update_counter()
+        return source_row
+
     def go_to_previous(self):
         current = self.list_view.currentIndex()
         if current.isValid() and current.row() > 0:

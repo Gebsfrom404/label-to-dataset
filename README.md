@@ -1,6 +1,3 @@
-# **Wibecoded af, so it works on hopes and eyeballing.**  
-# **No single line was read by me, used only references to my old yolo train/inference code and taggui interface for caption tab.**  
-
 # Label-to-Dataset (LTD)
 A desktop application for building image datasets end-to-end: label images, modify them (inpaint/remove objects), caption them with tags, and train YOLO models — all in a single pipeline.
 
