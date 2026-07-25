@@ -167,4 +167,13 @@ Per-image mask edit history: `_image_histories[id(ImageItem)] = (history_list, h
 - `_current_image_id` tracks the currently loaded image's id so `_on_image_changed` saves the outgoing history under the right key even if rows shifted
 - `_load_directory` / `load_from_label_tab` clear `_image_histories` and reset `_current_image_id` (old ImageItems are GC'd, so their ids could be reused)
 - `_delete_current_image` pops by `id(image)` and sets `_current_image_id = None` to prevent re-saving history for a deleted image
-- Entries capture full state (mask QImage, pixmap, paths, dims); max 50 entries
+- Entries capture full state (mask QImage, pixmap, paths, dims, **labels**); max 50 entries. Labels are in the snapshot because crop/split re-normalize them — read old entries with `entry.get('labels', ...)`, they predate the key
+- `_history_navigate` re-displays labels only when `need_image_reload` is set (otherwise the existing canvas items are still correct)
+
+## Restore Base State (Modify Tab)
+
+`_base_state[id(ImageItem)] = (mask_path, width, height, labels)` — the as-loaded state, captured by `_remember_base_state()` in `load_from_label_tab`, `_load_directory`, and for the two items `_apply_split` inserts.
+
+Crop/split overwrite `mask_path` with a crop-sized mask, resize `width`/`height`, and re-normalize `labels`; `modified_path = None` alone would leave that crop-sized mask stretched across the full-size image. `_restore_base_geometry()` puts all four back, and is a **no-op when the dimensions still match** — a same-size modification (inpaint) keeps whatever mask edits the user made.
+
+Safe to store just the mask *path*: as-loaded masks live in the `modify` temp dir or the source folder, while `_save_mask_buffer` always writes to the `masks` temp dir, so an edit never clobbers the base file.

@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QButtonGroup, QFileDialog, QGroupBox,
 
 from ltd.data.image_item import ImageItem
 from ltd.data.image_list_model import ImageListModel
-from ltd.data.label_data import DEFAULT_COLORS
+from ltd.data.label_data import DEFAULT_COLORS, Label
 from ltd.utils.file_utils import get_temp_dir_no_clear
 from ltd.utils.image_utils import load_pixmap_preview
 from ltd.utils.mask_utils import mask_from_qimage
@@ -31,6 +31,53 @@ from modules import discover_modules
 _TOOL_CROP = 'crop'
 _TOOL_SPLIT_V = 'split_v'
 _TOOL_SPLIT_H = 'split_h'
+
+
+def _crop_labels(labels: list[Label], img_w: int, img_h: int,
+                 ax: int, ay: int, aw: int, ah: int) -> list[Label]:
+    """Re-normalize labels onto a cropped region, dropping those outside.
+
+    Label coordinates are normalized against their own image, so a crop
+    invalidates them — without this they get stretched across the smaller
+    image. `ax/ay/aw/ah` is the crop rect in source-image pixels.
+
+    Polygons are clamped to the crop box rather than properly clipped:
+    labels are display-only in this tab, so an approximate outline is
+    enough and avoids a full Sutherland-Hodgman pass.
+    """
+    if img_w <= 0 or img_h <= 0 or aw <= 0 or ah <= 0:
+        return []
+    out: list[Label] = []
+    for label in labels:
+        bbox = None
+        polygon = None
+        if label.bbox is not None:
+            cx, cy, w, h = label.bbox
+            x1 = (cx - w / 2) * img_w - ax
+            x2 = (cx + w / 2) * img_w - ax
+            y1 = (cy - h / 2) * img_h - ay
+            y2 = (cy + h / 2) * img_h - ay
+            x1, x2 = max(0.0, x1), min(float(aw), x2)
+            y1, y2 = max(0.0, y1), min(float(ah), y2)
+            if x2 - x1 <= 1.0 or y2 - y1 <= 1.0:
+                continue
+            bbox = ((x1 + x2) / 2 / aw, (y1 + y2) / 2 / ah,
+                    (x2 - x1) / aw, (y2 - y1) / ah)
+        if label.polygon is not None and len(label.polygon) >= 3:
+            pts = [(px * img_w - ax, py * img_h - ay)
+                   for px, py in label.polygon]
+            xs = [p[0] for p in pts]
+            ys = [p[1] for p in pts]
+            if (max(xs) <= 0 or min(xs) >= aw
+                    or max(ys) <= 0 or min(ys) >= ah):
+                continue
+            polygon = [(min(max(px, 0.0), float(aw)) / aw,
+                        min(max(py, 0.0), float(ah)) / ah) for px, py in pts]
+        if bbox is None and polygon is None:
+            continue
+        out.append(Label(class_id=label.class_id, bbox=bbox, polygon=polygon,
+                         mask_path=label.mask_path))
+    return out
 
 
 class ModifyTab(QWidget):
@@ -55,6 +102,11 @@ class ModifyTab(QWidget):
         #   modified_path: Path|None, mask_path: Path|None,
         #   width: int, height: int
         self._image_histories: dict[int, tuple[list, int]] = {}
+        # As-loaded (mask_path, width, height, labels) per image, keyed by
+        # id(ImageItem). Crop/split overwrite mask_path with a crop-sized
+        # mask and discard the source dimensions; Restore needs the
+        # originals to put a full-size mask back on a full-size image.
+        self._base_state: dict[int, tuple] = {}
         self._mask_history: list[dict] = []
         self._history_pos: int = -1
         self._HISTORY_MAX = 50
@@ -306,31 +358,38 @@ class ModifyTab(QWidget):
         if image is None:
             return
 
+        # Images arriving from the label tab live in a temp folder, with
+        # original_path pointing at the real file — delete that too, or the
+        # source survives and only the working copy goes away.
+        source = image.original_path if image.original_path else image.path
+        detail = ('' if source == image.path
+                  else f'\n\nSource file:\n{source}')
         reply = QMessageBox.question(
             self, 'Delete Image',
-            f'Permanently delete "{image.filename}" from disk?',
+            f'Permanently delete "{source.name}" from disk?{detail}',
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No)
         if reply != QMessageBox.StandardButton.Yes:
             return
 
-        # Delete files from disk
-        try:
-            if image.path and image.path.exists():
-                image.path.unlink()
-            if image.modified_path and image.modified_path.exists():
-                image.modified_path.unlink()
-            if image.mask_path and image.mask_path.exists():
-                image.mask_path.unlink()
-            # Delete associated label file if exists
-            label_path = image.path.with_suffix('.txt')
-            if label_path.exists():
-                label_path.unlink()
-        except OSError:
-            pass
+        # Delete files from disk — working copy, its derivatives, and the
+        # source (plus each one's sibling label/caption .txt).
+        targets = [image.path, image.path.with_suffix('.txt'),
+                   image.modified_path, image.mask_path]
+        if source != image.path:
+            targets += [source, source.with_suffix('.txt')]
+        for path in targets:
+            if path is None:
+                continue
+            try:
+                if path.exists():
+                    path.unlink()
+            except OSError:
+                pass
 
-        # Clean up history for this image (by id so row shifts don't corrupt)
+        # Clean up per-image state (by id so row shifts don't corrupt it)
         self._image_histories.pop(id(image), None)
+        self._base_state.pop(id(image), None)
         # Prevent _on_image_changed from re-saving history for the deleted image
         self._current_image_id = None
         # Drop cached previews of the now-deleted files
@@ -578,12 +637,44 @@ class ModifyTab(QWidget):
         """Load images with masks from the label tab."""
         self._pixmap_cache.clear()
         self._image_histories.clear()
+        self._base_state.clear()
         self._current_image_id = None
         if colors:
             self._class_colors = colors
         self.model.load_items(items)
+        self._remember_base_state(self.model.images)
         if self.model.rowCount() > 0:
             self.image_list.select_index(0)
+
+    def _remember_base_state(self, images):
+        """Snapshot as-loaded mask/geometry so Restore can undo crops."""
+        for image in images:
+            self._base_state.setdefault(
+                id(image), (image.mask_path, image.width, image.height,
+                            list(image.labels)))
+
+    def _restore_base_geometry(self, image: ImageItem) -> bool:
+        """Put the as-loaded mask, size and labels back after a crop.
+
+        No-op when the geometry never changed — a same-size modification
+        (inpaint and friends) leaves mask edits intact.
+        """
+        base = self._base_state.get(id(image))
+        if base is None:
+            return False
+        mask_path, width, height, labels = base
+        if width <= 0 or height <= 0:
+            # imagesize failed at load — can't tell whether the geometry
+            # changed, so leave the current state alone rather than
+            # writing zero dimensions back.
+            return False
+        if (width, height) == (image.width, image.height):
+            return False
+        image.mask_path = mask_path
+        image.width = width
+        image.height = height
+        image.labels = list(labels)
+        return True
 
     def _load_directory(self, path: str):
         """Load a directory, detecting -masklabel pairs."""
@@ -592,6 +683,7 @@ class ModifyTab(QWidget):
         with loading_dialog('Loading images...', self):
             self._pixmap_cache.clear()
             self._image_histories.clear()
+            self._base_state.clear()
             self._current_image_id = None
             self.model.load_directory(directory)
 
@@ -599,6 +691,7 @@ class ModifyTab(QWidget):
                 mask_path = image.path.parent / f'{image.name}-masklabel.png'
                 if mask_path.exists():
                     image.mask_path = mask_path
+            self._remember_base_state(self.model.images)
 
         if self.model.rowCount() > 0:
             self.image_list.select_index(0)
@@ -631,6 +724,12 @@ class ModifyTab(QWidget):
                         Qt.AspectRatioMode.IgnoreAspectRatio,
                         Qt.TransformationMode.FastTransformation)
                 self.canvas.set_mask(mask_qimage)
+
+        # Labels are normalized to the image, so a crop/restore changes
+        # where they land — redraw instead of leaving the canvas bare
+        # until the next image switch.
+        if image.labels:
+            self.canvas.display_labels(image.labels, self._class_colors)
 
         self.model.invalidate_thumbnail(self._current_image_index)
         self._history_record(action_name)
@@ -729,6 +828,7 @@ class ModifyTab(QWidget):
             'mask_path': image.mask_path,
             'width': image.width,
             'height': image.height,
+            'labels': list(image.labels),
         }
 
     def _history_init(self):
@@ -802,6 +902,9 @@ class ModifyTab(QWidget):
         image.mask_path = entry['mask_path']
         image.width = entry['width']
         image.height = entry['height']
+        # Labels are re-normalized by crop/split, so they're part of the
+        # snapshot — entries recorded before this existed have no key.
+        image.labels = list(entry.get('labels', image.labels))
 
         if need_image_reload:
             self.canvas.load_image(entry['pixmap'])
@@ -820,6 +923,8 @@ class ModifyTab(QWidget):
                     Qt.TransformationMode.FastTransformation)
         self.canvas.set_mask(mask_snapshot.copy())
         self.canvas._update_mask_overlay_fast()
+        if need_image_reload and image.labels:
+            self.canvas.display_labels(image.labels, self._class_colors)
         self._save_mask_buffer(image)
         self._sync_history_list()
 
@@ -1003,6 +1108,10 @@ class ModifyTab(QWidget):
             mask_img.close()
 
         image.modified_path = out_path
+        # Re-normalize labels onto the crop, else they stretch across the
+        # smaller image the next time it's displayed.
+        image.labels = _crop_labels(image.labels, actual_w, actual_h,
+                                    ax, ay, aw, ah)
         image.width = aw
         image.height = ah
         self._pixmap_cache.pop(str(source_path), None)
@@ -1034,12 +1143,16 @@ class ModifyTab(QWidget):
             part1 = pil_img.crop((0, 0, split_x, actual_h))
             part2 = pil_img.crop((split_x, 0, actual_w, actual_h))
             sizes = [(split_x, actual_h), (actual_w - split_x, actual_h)]
+            rects = [(0, 0, split_x, actual_h),
+                     (split_x, 0, actual_w - split_x, actual_h)]
         else:
             split_y = int(split_pos * actual_h)
             split_y = max(1, min(split_y, actual_h - 1))
             part1 = pil_img.crop((0, 0, actual_w, split_y))
             part2 = pil_img.crop((0, split_y, actual_w, actual_h))
             sizes = [(actual_w, split_y), (actual_w, actual_h - split_y)]
+            rects = [(0, 0, actual_w, split_y),
+                     (0, split_y, actual_w, actual_h - split_y)]
 
         path1 = temp_dir / f'{stem}_part1{ext}'
         path2 = temp_dir / f'{stem}_part2{ext}'
@@ -1066,12 +1179,17 @@ class ModifyTab(QWidget):
             mask_img.close()
 
         item1 = ImageItem(path=path1, width=sizes[0][0], height=sizes[0][1],
-                          mask_path=mask_path1)
+                          mask_path=mask_path1,
+                          labels=_crop_labels(image.labels, actual_w,
+                                              actual_h, *rects[0]))
         item2 = ImageItem(path=path2, width=sizes[1][0], height=sizes[1][1],
-                          mask_path=mask_path2)
+                          mask_path=mask_path2,
+                          labels=_crop_labels(image.labels, actual_w,
+                                              actual_h, *rects[1]))
 
         insert_pos = self._current_image_index + 1
         self.model.insert_items(insert_pos, [item1, item2])
+        self._remember_base_state([item1, item2])
 
         self._set_tool(Tool.HAND)
         self.image_list.select_index(insert_pos)
@@ -1215,6 +1333,7 @@ class ModifyTab(QWidget):
         self._pixmap_cache.pop(str(image.modified_path), None)
         self._pixmap_cache.pop(str(image.path), None)
         image.modified_path = None
+        self._restore_base_geometry(image)
         self._reload_and_record(image, 'Restore')
         self.mod_status.setText('Restored original image')
 
@@ -1236,6 +1355,7 @@ class ModifyTab(QWidget):
             self._pixmap_cache.pop(str(image.modified_path), None)
             self._pixmap_cache.pop(str(image.path), None)
             image.modified_path = None
+            self._restore_base_geometry(image)
             self.model.invalidate_thumbnail(self.model.images.index(image))
             # Clear per-image histories for other images (by id)
             if image is not cur_image:

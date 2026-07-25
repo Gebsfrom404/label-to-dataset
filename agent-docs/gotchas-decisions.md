@@ -104,6 +104,18 @@ if self._current_image_index != new_row:
 
 Related: with a filter proxy (Label / Caption / Gen lists), the next **source** row may be hidden. Pick the next row in *proxy* space instead — `LabelImageList.current_proxy_row()` / `select_proxy_row()`.
 
+## Labels Are Normalized — Crop/Split Invalidates Them
+
+`Label.bbox` (cx, cy, w, h) and `Label.polygon` are normalized to *their own image*, so any geometry change silently re-interprets them: after a crop the same numbers get stretched across the smaller image. The symptom hides until the next image switch, because `_reload_and_record` used not to redraw labels at all.
+
+`_crop_labels(labels, img_w, img_h, ax, ay, aw, ah)` (module level in `modify_tab.py`) re-normalizes onto the crop rect and drops labels that fall outside; `_apply_crop` and both halves of `_apply_split` go through it. Polygons are **clamped** to the crop box, not properly clipped — labels are display-only in ModifyTab, so an approximate outline beats a Sutherland-Hodgman pass.
+
+## ModifyTab Deletes the Source, Not Just the Working Copy
+
+Images handed over by "Proceed to Modify" live in the `modify` temp dir; `path` is the temp copy and `original_path` is the real file (`LabelTab._copy_to_modify`). `_delete_current_image` deletes **both**, plus `modified_path`, `mask_path`, and each one's sibling `.txt` — deleting only `path` left the source in place, which is not what "delete image" means to a user.
+
+The delete does **not** notify the Label tab, so its list still shows the (now missing) image until reloaded.
+
 ## Per-Image State Keyed by Row Breaks on Deletion
 
 `LabelTab._undo_stacks` and `CaptionTab._undo_stacks` / `_redo_stacks` are `dict[row_index, ...]`. Removing a row shifts every later image down one, so the stacks silently attach to the wrong images. `LabelTab._delete_current_image` remaps them (`{i - 1 if i > row else i}`); **CaptionTab does not** — its delete path leaves undo history misaligned. ModifyTab sidesteps this entirely by keying `_image_histories` on `id(image)`.
