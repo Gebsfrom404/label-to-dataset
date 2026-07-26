@@ -16,11 +16,11 @@ Each stage is a tab. Data flows forward via the "Copy to..." buttons, or each ta
 
 Tools, shortcuts and options are documented in-app — hover the ⓘ buttons.
 
+https://github.com/user-attachments/assets/fc8c6859-8e56-4e00-9f69-9251bf49d636
+
 ## Installation
 
 **Requirements:** Python 3.13+ (the uv installer below can fetch it for you). An NVIDIA GPU is strongly recommended — PyTorch is installed from the CUDA 12.8 index; everything still falls back to CPU, it's just will be slower.
-
-https://github.com/user-attachments/assets/fc8c6859-8e56-4e00-9f69-9251bf49d636
 
 ### 1. Install
 
