@@ -41,15 +41,17 @@ Setters in `workflow.py`: `set_input_image`, `set_input_mask`, `set_input_text`,
 - `validate_caption_workflow(json)`
 - `validate_generation_workflow(json)` — requires `LTD_Input_Text`, `LTD_Latent_Size`, `LTD_Output_Image`
 
-### Caption→Image Generation (Caption tab, Tools)
+### Caption→Image Generation (Caption tab, Generate)
 
-The Caption tab's Tools tab has a "Compare original image to generated from caption" subsection: a `WorkflowSelector(settings_key='generate')` + Current/Selected/All buttons. `CaptionImageGenerator` (in `caption_tab.py`) renders each image's caption:
+The Caption tab's **Generate** tab ("Compare original image to generated from caption") holds a `WorkflowSelector(settings_key='generate')`, a **Show** checkbox, and Current/Selected/All buttons. `CaptionImageGenerator` (in `caption_tab.py`) renders each image's caption:
 - injects the caption via `set_input_text` and, via `set_latent_size`, the output dimensions computed by `CaptionImageGenerator.compute_dims()` — the original's aspect ratio scaled to ~1 MPix and snapped to a multiple of 16;
 - runs through `ComfyUIClient.run_workflow` and copies the first output image into a per-folder cache (see data-formats-storage.md), never into the source folder.
 - Runs in `GenerationWorker` (`ltd/workers/generation_worker.py`), the same progress/cancel/batch pattern as `CaptionWorker`. After the batch the worker calls the generator's `finalize()` hook, which calls `ComfyUIClient.free()` (`POST /free` `{"unload_models": true, "free_memory": true}`) to drop models from VRAM — best-effort.
 - Shipped workflow: `Comfy-workflows/Generate from caption (krea2 turbo).json` (adapted from a krea2-turbo text-to-image graph with the three LTD nodes renamed).
 
-When a cached render exists for the displayed image, `CaptionTab._on_image_changed` shows it beside the original via `CaptionImageViewer.load_comparison`: two `QGraphicsPixmapItem`s — the **original at native resolution** (never downscaled; reused from `_pixmap_cache` when available) and the generated scaled to share the common dimension so the pair displays equal-sized while both retain full detail on zoom. Landscape originals stack top/bottom; square/portrait sit left/right.
+When a cached render exists for the displayed image, `CaptionTab._display_image` (called by `_on_image_changed`) shows it beside the original via `CaptionImageViewer.load_comparison`: two `QGraphicsPixmapItem`s — the **original at native resolution** (never downscaled; reused from `_pixmap_cache` when available) and the generated scaled to share the common dimension so the pair displays equal-sized while both retain full detail on zoom. Landscape originals stack top/bottom; square/portrait sit left/right.
+
+The **Show** checkbox (`generate_show_check`, persisted at `caption/generate_show`, default on) gates that comparison: with it off `_display_image` ignores the cached render and shows the original alone, and `_on_generated_result` doesn't swap a freshly finished render onto the screen. Renders stay on disk either way, so toggling it back on re-displays them — the handler `_on_generate_show_toggled` re-runs `_display_image` on the current image so the switch is immediate.
 
 `ComfyUIClient.run_workflow` downloads outputs honoring each file's `subfolder`/`type` from history (a SaveImage `filename_prefix` like `folder/name` saves into a subfolder), and `download_output` raises on HTTP error rather than writing a broken file.
 

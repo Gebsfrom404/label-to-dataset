@@ -99,7 +99,7 @@ The right-panel header has a **Tags / Caption** dropdown (`panel_mode_combo`, pe
 The `Image Caption` panel is a tab inside `right_tabs` (a `QPlainTextEdit` named `caption_edit`, inserted at index 0, holding `separator.join(image.tags)`). Above it sits a `caption_search` line edit that highlights all (case-insensitive) matches in the box via `setExtraSelections` (`_update_caption_search_highlights`) — display-only, so it never mutates the document/undo. Re-applied on caption load and on edit, so the term stays sticky across image navigation. `_set_caption_mode_tabs(is_caption)` toggles per-tab visibility via `QTabWidget.setTabVisible`:
 - **Tags** (`_panel_mode == 'tags'`): Image Tags + All Tags visible, Image Caption hidden.
 - **Caption** (`_panel_mode == 'caption'`): Image Caption visible, Image Tags + All Tags hidden.
-- **Auto-Caption** and **Tools** stay visible in both modes (they still write to `image.tags`, so `_on_caption_result` and the snapshot-restore paths call `_sync_caption_view()`).
+- **Auto-Caption**, **Tools**, **Generate** and **Fast Insertion** stay visible in both modes (those that write to `image.tags` — `_on_caption_result`, the metadata pull, the snapshot-restore paths — call `_sync_caption_view()`).
 
 ### Fast Insertion tab
 
@@ -138,7 +138,7 @@ Root: `{tempdir}/label-to-dataset/`
 
 ### Generated-image comparison cache (`generated_*`)
 
-The Caption tab's "Compare original image to generated from caption" tool renders a caption via ComfyUI and caches the result at `{tempdir}/label-to-dataset/generated_{md5(folder)[:12]}/`, keyed by the loaded folder path (same hashing scheme as `labels_*`). Filenames come from `caption_tab.generated_cache_name(image)` — the image's relative path with unsafe chars replaced, `.png` extension — so images with the same stem in different subfolders don't collide. Never written into the source folder. `cleanup_all_temp()` preserves these dirs so comparisons survive restarts.
+The Caption tab's **Generate** tab ("Compare original image to generated from caption") renders a caption via ComfyUI and caches the result at `{tempdir}/label-to-dataset/generated_{md5(folder)[:12]}/`, keyed by the loaded folder path (same hashing scheme as `labels_*`). Filenames come from `caption_tab.generated_cache_name(image)` — the image's relative path with unsafe chars replaced, `.png` extension — so images with the same stem in different subfolders don't collide. Never written into the source folder. `cleanup_all_temp()` preserves these dirs so comparisons survive restarts.
 
 ## Settings Persistence
 

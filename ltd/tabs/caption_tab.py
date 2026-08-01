@@ -1146,9 +1146,18 @@ class CaptionTab(QWidget):
         meta_layout.addLayout(meta_btn_layout)
         tools_layout.addWidget(meta_group)
 
-        # ---- Compare original image to generated from caption ----
-        gen_group = QGroupBox('Compare original image to generated from caption')
-        gen_layout = QVBoxLayout(gen_group)
+        tools_layout.addStretch()
+        self.right_tabs.addTab(tools_tab, 'Tools')
+
+        # ---- Tab: Generate ----
+        # Compare the original image to a render of its caption (ComfyUI).
+        gen_tab = QWidget()
+        gen_layout = QVBoxLayout(gen_tab)
+        gen_title = QLabel('Compare original image to generated from caption')
+        gen_title.setStyleSheet('font-weight: bold;')
+        gen_title.setWordWrap(True)
+        gen_layout.addWidget(gen_title)
+
         self._generate_workflow_selector = WorkflowSelector(
             settings_key='generate')
         gen_layout.addWidget(self._generate_workflow_selector)
@@ -1158,6 +1167,14 @@ class CaptionTab(QWidget):
             'LTD_Input_Text, LTD_Latent_Size, LTD_Output_Image.')
         gen_info.setWordWrap(True)
         gen_layout.addWidget(gen_info)
+
+        self.generate_show_check = QCheckBox('Show')
+        self.generate_show_check.setChecked(True)
+        self.generate_show_check.setToolTip(
+            'Show the generated render beside the original.\n'
+            'Uncheck to view only the original — the renders stay cached and '
+            'reappear when you check it again.')
+        gen_layout.addWidget(self.generate_show_check)
 
         gen_btn_layout = QHBoxLayout()
         gen_btn_layout.addWidget(QLabel('Generate:'))
@@ -1175,10 +1192,9 @@ class CaptionTab(QWidget):
         self.generate_progress = QProgressBar()
         self.generate_progress.setVisible(False)
         gen_layout.addWidget(self.generate_progress)
-        tools_layout.addWidget(gen_group)
 
-        tools_layout.addStretch()
-        self.right_tabs.addTab(tools_tab, 'Tools')
+        gen_layout.addStretch()
+        self.right_tabs.addTab(gen_tab, 'Generate')
 
         # ---- Tab: Fast Insertion ----
         # Ten editable tag slots mapped to number keys 1..9,0. When enabled,
@@ -1373,6 +1389,8 @@ class CaptionTab(QWidget):
         self.generate_all_btn.clicked.connect(
             lambda: self._run_generation(mode='all'))
         self.generate_cancel_btn.clicked.connect(self._cancel_generation)
+        self.generate_show_check.toggled.connect(
+            self._on_generate_show_toggled)
 
         # Tools
         self.find_replace_btn.clicked.connect(self._show_find_replace)
@@ -1520,6 +1538,9 @@ class CaptionTab(QWidget):
             s.value('caption/metadata_position', 1, type=int))
         self.metadata_skip_existing.setChecked(
             s.value('caption/metadata_skip_existing', True, type=bool))
+        # Persisted in the toggle handler (it also refreshes the viewer).
+        self.generate_show_check.setChecked(
+            s.value('caption/generate_show', True, type=bool))
         self.captioner_combo.setCurrentIndex(
             s.value('caption/captioner', 0, type=int))
         self.separator_input.setText(
@@ -2063,6 +2084,42 @@ class CaptionTab(QWidget):
         self.image_viewer.replace_pixmap(pixmap)
         self._fullres_loader = None
 
+    def _display_image(self, image: ImageItem):
+        """Show an image in the viewer — beside its generated render when one
+        is cached and the Generate tab's "Show" box is checked, else alone."""
+        # Cancel any in-flight full-res load
+        self._cancel_fullres_loader()
+
+        gen_path = (self._generated_path(image)
+                    if self.generate_show_check.isChecked() else None)
+        if gen_path is not None:
+            # A generated render exists — show it beside the original.
+            self._show_comparison(image.path, gen_path)
+            return
+
+        key = str(image.path)
+        cached = self._pixmap_cache.get(key)
+        if cached:
+            # Cache hit — show immediately
+            self._pixmap_cache.move_to_end(key)
+            self.image_viewer.load_image(cached)
+        else:
+            # Show preview instantly, then swap full-res from background
+            pixmap = load_pixmap_preview(image.path, self._preview_max_dim())
+            self.image_viewer.load_image(pixmap)
+
+            loader = _FullResLoader(image.path, self)
+            loader.ready.connect(self._on_fullres_ready)
+            loader.start()
+            self._fullres_loader = loader
+
+    def _on_generate_show_toggled(self, checked: bool):
+        """Re-display the current image with/without its generated render."""
+        self._save_setting('generate_show', checked)
+        image = self.model.get_image(self._current_image_index)
+        if image is not None:
+            self._display_image(image)
+
     def _on_image_changed(self, index: int):
         self._save_current_tags()
         self._current_image_index = index
@@ -2073,30 +2130,7 @@ class CaptionTab(QWidget):
         # Snapshot for undo tracking
         self._pre_tags_snapshot = list(image.tags)
 
-        # Cancel any in-flight full-res load
-        self._cancel_fullres_loader()
-
-        gen_path = self._generated_path(image)
-        if gen_path is not None:
-            # A generated render exists — show it beside the original.
-            self._show_comparison(image.path, gen_path)
-        else:
-            key = str(image.path)
-            cached = self._pixmap_cache.get(key)
-            if cached:
-                # Cache hit — show immediately
-                self._pixmap_cache.move_to_end(key)
-                self.image_viewer.load_image(cached)
-            else:
-                # Show preview instantly, then swap full-res from background
-                pixmap = load_pixmap_preview(image.path,
-                                             self._preview_max_dim())
-                self.image_viewer.load_image(pixmap)
-
-                loader = _FullResLoader(image.path, self)
-                loader.ready.connect(self._on_fullres_ready)
-                loader.start()
-                self._fullres_loader = loader
+        self._display_image(image)
 
         # Show tags
         self._skip_snapshot = True
@@ -2927,8 +2961,10 @@ class CaptionTab(QWidget):
         image = images[index]
         all_idx = self.model.images.index(image) \
             if image in self.model.images else -1
-        # If the generated image is the one on screen, show the comparison now.
-        if all_idx == self._current_image_index:
+        # If the generated image is the one on screen, show the comparison now
+        # (unless the user turned the comparison off).
+        if (all_idx == self._current_image_index
+                and self.generate_show_check.isChecked()):
             self._show_comparison(image.path, Path(path))
 
     def _on_generation_finished(self):
