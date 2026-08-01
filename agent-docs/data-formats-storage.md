@@ -65,6 +65,14 @@ Read-only parser in `ltd/data/gen_metadata.py`. PNG text chunks are read via Pil
 
 `ImageItem.metadata: GenMetadata | None` carries the parsed result on the shared image dataclass.
 
+### Pull from metadata (Caption tab → Tools)
+
+`_pull_metadata(mode)` reuses the same parser to turn an image's embedded positive prompt into caption tags, with the usual **Current / Selected / All** buttons (target resolution mirrors `_run_captioning`). Options: a Position combo (Before / After / Overwrite, persisted at `caption/metadata_position`, default After) and a "Skip duplicates" checkbox (`caption/metadata_skip_existing`, default on).
+
+- `_parse_metadata_for()` fills `image.metadata` only for images where it is still `None` — a single image is parsed inline, several go through `MetadataWorker` under a `loading_dialog` + `QEventLoop`. Since `MetadataWorker` skips already-parsed images (and emits no `parsed` signal for them), the apply loop reads `image.metadata` directly instead of relying on the signal, so re-pulling works off the cache.
+- `_merge_metadata_tags()` collapses duplicates inside the prompt itself always, and drops tags the image already has when "Skip duplicates" is on — except in Overwrite mode, where the existing tags are discarded anyway.
+- Writes go through `_push_undo` (one batch id when >1 image, so Ctrl+Z reverts the whole pull) + `_auto_save_image`, then `_sync_caption_view()` / `_rebuild_all_tags()`. Images with no metadata are counted and reported in the status line.
+
 ## Captions
 
 Plain `.txt` files with tags, stored alongside images.

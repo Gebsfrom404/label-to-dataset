@@ -27,6 +27,7 @@ from ltd.comfyui.workflow import (load_workflow, validate_caption_workflow,
                                   validate_generation_workflow,
                                   set_input_image, set_input_text,
                                   set_latent_size, set_seed)
+from ltd.data.gen_metadata import GenMetadata, parse_metadata
 from ltd.data.image_item import ImageItem
 from ltd.data.tag_dictionary import TagDictionary
 from ltd.settings import get_settings
@@ -42,6 +43,7 @@ from ltd.widgets.tag_completer_popup import TagCompleterPopup
 from ltd.widgets.workflow_selector import WorkflowSelector
 from ltd.workers.caption_worker import CaptionWorker
 from ltd.workers.generation_worker import GenerationWorker
+from ltd.workers.metadata_worker import MetadataWorker
 from ltd.workers.zip_worker import ZipWorker
 
 
@@ -1102,6 +1104,48 @@ class CaptionTab(QWidget):
         tools_row3.addWidget(self.zip_selected_btn)
         tools_layout.addLayout(tools_row3)
 
+        # ---- Pull tags from generation metadata ----
+        # Same parsing as the Manage Gen Images tab: the positive prompt of
+        # the embedded forge/a1111 or ComfyUI metadata, split into tags.
+        meta_group = QGroupBox('Pull from metadata')
+        meta_layout = QVBoxLayout(meta_group)
+        meta_info = QLabel(
+            'Reads the generation metadata embedded in the image (forge / '
+            'a1111 or ComfyUI) and pulls its positive prompt in as tags — '
+            'the same parsing the Manage Gen Images tab uses.')
+        meta_info.setWordWrap(True)
+        meta_layout.addWidget(meta_info)
+
+        meta_opts = QHBoxLayout()
+        meta_opts.addWidget(QLabel('Position:'))
+        self.metadata_position_combo = QComboBox()
+        self.metadata_position_combo.addItems([
+            'Before existing tags',
+            'After existing tags',
+            'Overwrite all tags',
+        ])
+        self.metadata_position_combo.setCurrentIndex(1)
+        meta_opts.addWidget(self.metadata_position_combo)
+        self.metadata_skip_existing = QCheckBox('Skip duplicates')
+        self.metadata_skip_existing.setChecked(True)
+        self.metadata_skip_existing.setToolTip(
+            'Do not pull in a prompt tag the image already has '
+            '(case-insensitive).')
+        meta_opts.addWidget(self.metadata_skip_existing)
+        meta_opts.addStretch()
+        meta_layout.addLayout(meta_opts)
+
+        meta_btn_layout = QHBoxLayout()
+        meta_btn_layout.addWidget(QLabel('Pull:'))
+        self.metadata_current_btn = QPushButton('Current')
+        self.metadata_selected_btn = QPushButton('Selected')
+        self.metadata_all_btn = QPushButton('All')
+        meta_btn_layout.addWidget(self.metadata_current_btn)
+        meta_btn_layout.addWidget(self.metadata_selected_btn)
+        meta_btn_layout.addWidget(self.metadata_all_btn)
+        meta_layout.addLayout(meta_btn_layout)
+        tools_layout.addWidget(meta_group)
+
         # ---- Compare original image to generated from caption ----
         gen_group = QGroupBox('Compare original image to generated from caption')
         gen_layout = QVBoxLayout(gen_group)
@@ -1343,6 +1387,12 @@ class CaptionTab(QWidget):
         self.reload_autocompletions_btn.clicked.connect(
             self._reload_autocompletions)
         self.zip_selected_btn.clicked.connect(self._zip_selected)
+        self.metadata_current_btn.clicked.connect(
+            lambda: self._pull_metadata(mode='current'))
+        self.metadata_selected_btn.clicked.connect(
+            lambda: self._pull_metadata(mode='selected'))
+        self.metadata_all_btn.clicked.connect(
+            lambda: self._pull_metadata(mode='all'))
 
         # Save / separator
         self.save_captions_btn.clicked.connect(self._save_all_captions)
@@ -1466,6 +1516,10 @@ class CaptionTab(QWidget):
             s.value('caption/exclude_tags', '', type=str))
         self.caption_position_combo.setCurrentIndex(
             s.value('caption/position', 1, type=int))
+        self.metadata_position_combo.setCurrentIndex(
+            s.value('caption/metadata_position', 1, type=int))
+        self.metadata_skip_existing.setChecked(
+            s.value('caption/metadata_skip_existing', True, type=bool))
         self.captioner_combo.setCurrentIndex(
             s.value('caption/captioner', 0, type=int))
         self.separator_input.setText(
@@ -1504,6 +1558,10 @@ class CaptionTab(QWidget):
                                        self.exclude_input.text()))
         self.caption_position_combo.currentIndexChanged.connect(
             lambda v: self._save_setting('position', v))
+        self.metadata_position_combo.currentIndexChanged.connect(
+            lambda v: self._save_setting('metadata_position', v))
+        self.metadata_skip_existing.toggled.connect(
+            lambda v: self._save_setting('metadata_skip_existing', v))
         self.captioner_combo.currentIndexChanged.connect(
             lambda v: self._save_setting('captioner', v))
         self.separator_input.editingFinished.connect(
@@ -3065,6 +3123,124 @@ class CaptionTab(QWidget):
         self._rebuild_all_tags()
         self.caption_status.setText(
             f'Removed {count} duplicate(s) across all images')
+
+    # ------------------------------------------------------------------
+    # Pull tags from generation metadata
+    # ------------------------------------------------------------------
+
+    def _merge_metadata_tags(self, existing: list[str],
+                             new_tags: list[str]) -> list[str]:
+        """Merge prompt tags into an image's tags per the Position combo.
+
+        With "Skip duplicates" on, a pulled tag is dropped when the image
+        already carries it (case-insensitive); duplicates inside the prompt
+        itself are always collapsed. In Overwrite mode there is nothing to
+        keep, so only the prompt-internal duplicates are collapsed.
+        """
+        pos = self.metadata_position_combo.currentIndex()
+        seen = set()
+        if self.metadata_skip_existing.isChecked() and pos != 2:
+            seen = {t.strip().lower() for t in existing}
+        unique = []
+        for tag in new_tags:
+            key = tag.strip().lower()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            unique.append(tag)
+        if pos == 0:  # Before existing
+            return unique + existing
+        if pos == 1:  # After existing
+            return existing + unique
+        return unique  # Overwrite
+
+    def _on_metadata_parsed(self, image: ImageItem, md: GenMetadata):
+        image.metadata = md
+
+    def _parse_metadata_for(self, images: list[ImageItem]):
+        """Fill ``image.metadata`` for images that haven't been parsed yet."""
+        if len(images) == 1:
+            image = images[0]
+            try:
+                image.metadata = parse_metadata(image.path)
+            except Exception:
+                image.metadata = GenMetadata()
+            return
+        with loading_dialog(
+                f'Reading metadata for {len(images)} image(s)...', self) as dlg:
+            dlg.set_progress(0, len(images))
+            loop = QEventLoop()
+            worker = MetadataWorker(images, self)
+            worker.parsed.connect(self._on_metadata_parsed)
+            worker.progress.connect(dlg.set_progress)
+            worker.finished_all.connect(loop.quit)
+            worker.start()
+            loop.exec()
+            worker.wait()
+
+    def _pull_metadata(self, mode: str = 'all'):
+        """Pull the embedded positive prompt in as tags (current/selected/all).
+
+        Parsed metadata is cached on the ImageItem, so re-pulling doesn't
+        re-read the files.
+        """
+        if mode == 'current':
+            image = self.model.get_image(self._current_image_index)
+            if image is None:
+                return
+            images = [image]
+        elif mode == 'selected':
+            images = self.image_list.get_selected_images()
+            if not images:
+                QMessageBox.information(self, 'Info', 'No images selected.')
+                return
+        else:
+            images = list(self.model.images)
+        if not images:
+            return
+
+        # Flush the pending edit on the current image before mutating tags.
+        self._save_current_tags()
+
+        pending = [img for img in images if img.metadata is None]
+        if pending:
+            self._parse_metadata_for(pending)
+
+        changed = 0
+        without = 0
+        bid = self._new_batch_id() if len(images) > 1 else None
+        for image in images:
+            md = image.metadata
+            prompt_tags = md.tags if md is not None else []
+            if not prompt_tags:
+                without += 1
+                continue
+            merged = self._merge_metadata_tags(image.tags, prompt_tags)
+            if merged == image.tags:
+                continue
+            idx = self.model.images.index(image) \
+                if image in self.model.images else -1
+            if idx >= 0:
+                self._push_undo(idx, list(image.tags), bid)
+            image.tags = merged
+            self._auto_save_image(image)
+            changed += 1
+
+        if self._current_image_index >= 0:
+            image = self.model.get_image(self._current_image_index)
+            if image:
+                self._pre_tags_snapshot = list(image.tags)
+                self._skip_snapshot = True
+                self.tags_list.set_tags(image.tags)
+                self._skip_snapshot = False
+        self._sync_caption_view()
+        self._rebuild_all_tags()
+        self._update_token_count()
+
+        msg = f'Pulled metadata tags into {changed} image(s)'
+        if without:
+            msg += f' ({without} without generation metadata)'
+        self.caption_status.setText(msg)
 
     # ------------------------------------------------------------------
     # Snapshots
