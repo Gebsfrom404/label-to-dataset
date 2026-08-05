@@ -11,11 +11,15 @@ class ModificationWorker(BaseWorker):
     modification_complete = Signal(int, str)  # image_index, output_path
 
     def __init__(self, module, images: list[ImageItem],
-                 use_current: bool = False, parent=None):
+                 use_current: bool = False, use_mask: bool = True,
+                 parent=None):
         super().__init__(parent)
         self.module = module
         self.images = images
         self.use_current = use_current
+        # False when the module ignores masks (e.g. a ComfyUI workflow with
+        # no LTD_Input_Mask node) — then maskless images still get processed.
+        self.use_mask = use_mask
 
     def do_work(self):
         total = len(self.images)
@@ -30,11 +34,12 @@ class ModificationWorker(BaseWorker):
 
                 try:
                     source = image.display_path if self.use_current else image.path
-                    if image.mask_path is None:
+                    if self.use_mask and image.mask_path is None:
                         self.status.emit(f'Skipping {image.filename}: no mask')
                         continue
 
-                    output_path = self.module.run(source, image.mask_path)
+                    mask = image.mask_path if self.use_mask else None
+                    output_path = self.module.run(source, mask)
                     self.modification_complete.emit(i, str(output_path))
                 except Exception as e:
                     msg = f'{image.filename}: {e}'

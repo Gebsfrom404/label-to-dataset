@@ -315,7 +315,12 @@ class LabelTab(QWidget):
 
     def eventFilter(self, obj, event):
         from PySide6.QtCore import QEvent
+        from ltd.utils.qt_utils import text_input_has_focus
         if event.type() in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
+            # Space belongs to the focused text field (e.g. the detection
+            # workflow's prompt box), not to the canvas pan toggle.
+            if text_input_has_focus():
+                return super().eventFilter(obj, event)
             if event.key() == Qt.Key.Key_Space and not event.isAutoRepeat():
                 if event.type() == QEvent.Type.KeyPress:
                     self.canvas.keyPressEvent(event)

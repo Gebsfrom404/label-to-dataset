@@ -17,6 +17,7 @@ from ltd.data.label_data import DEFAULT_COLORS, Label
 from ltd.utils.file_utils import get_temp_dir_no_clear
 from ltd.utils.image_utils import load_pixmap_preview
 from ltd.utils.mask_utils import mask_from_qimage
+from ltd.utils.qt_utils import text_input_has_focus
 from ltd.widgets.canvas_widget import CanvasWidget, DrawMode, Tool
 from ltd.widgets.image_list_widget import ImageListWidget
 from ltd.widgets.elided_label import ElidedLabel
@@ -91,6 +92,9 @@ class ModifyTab(QWidget):
         self._current_image_index = -1
         self._current_image_id: int | None = None
         self._worker: ModificationWorker | None = None
+        self._single_mode = False
+        # Images handed to the running worker, in worker index order
+        self._run_images: list[ImageItem] = []
         self._class_colors: list[str] = list(DEFAULT_COLORS)
         self._pixmap_cache: OrderedDict[str, object] = OrderedDict()
         self._active_tool = None  # Track which tool is active (Tool enum or str)
@@ -470,6 +474,10 @@ class ModifyTab(QWidget):
 
     def eventFilter(self, obj, event):
         if event.type() in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
+            # Never steal characters from a text field (workflow prompt box,
+            # custom JSON area, spin boxes...) — Space/A/D belong to it.
+            if text_input_has_focus():
+                return super().eventFilter(obj, event)
             key = event.key()
             if key == Qt.Key.Key_Space and not event.isAutoRepeat():
                 if event.type() == QEvent.Type.KeyPress:
@@ -1248,20 +1256,14 @@ class ModifyTab(QWidget):
 
         if single:
             image = self.model.get_image(self._current_image_index)
-            if image is None or image.mask_path is None:
-                QMessageBox.information(
-                    self, 'Info', 'Current image has no mask.')
+            if image is None:
                 return
-            images_to_run = [image]
-            self._single_mode = True
+            candidates = [image]
         else:
-            images_to_run = [img for img in self.model.images
-                             if img.mask_path is not None]
-            if not images_to_run:
-                QMessageBox.information(
-                    self, 'Info', 'No images with masks.')
+            candidates = list(self.model.images)
+            if not candidates:
+                QMessageBox.information(self, 'Info', 'No images loaded.')
                 return
-            self._single_mode = False
 
         try:
             module.prepare()
@@ -1269,8 +1271,32 @@ class ModifyTab(QWidget):
             QMessageBox.critical(self, 'Module Error', str(e))
             return
 
+        # A ComfyUI workflow only consumes a mask when it has an
+        # LTD_Input_Mask node; LaMa and friends always do.
+        wants_mask = getattr(module, 'wants_mask', None)
+        use_mask = bool(wants_mask()) if callable(wants_mask) else True
+
+        if use_mask:
+            images_to_run = [img for img in candidates
+                             if img.mask_path is not None]
+            if not images_to_run:
+                detail = ('Current image has no mask.' if single
+                          else 'No images have masks.')
+                name = getattr(module, 'name', 'Workflow')
+                QMessageBox.critical(self, 'Mask Required',
+                                     f'{name} requires mask.\n\n{detail}')
+                return
+        else:
+            images_to_run = candidates
+            if any(img.mask_path is not None for img in images_to_run):
+                if not self._confirm_ignore_mask(single):
+                    return
+
+        self._single_mode = single
+        self._run_images = images_to_run
+
         self._worker = ModificationWorker(
-            module, images_to_run, use_current=True)
+            module, images_to_run, use_current=True, use_mask=use_mask)
         self._worker.progress.connect(self._on_mod_progress)
         self._worker.status.connect(self._on_mod_status)
         self._worker.modification_complete.connect(self._on_mod_result)
@@ -1281,6 +1307,22 @@ class ModifyTab(QWidget):
         self.cancel_btn.setVisible(not single)
         self._set_run_buttons_enabled(False)
         self._worker.start()
+
+    def _confirm_ignore_mask(self, single: bool) -> bool:
+        """Warn that the workflow has no LTD_Input_Mask node but a mask exists."""
+        detail = ('The current image has a mask' if single
+                  else 'Some of the images have masks')
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle('Workflow Has No Mask Input')
+        box.setText(f'{detail}, but the selected workflow has no '
+                    'LTD_Input_Mask node.\n\nThe mask will be ignored.')
+        proceed = box.addButton('Proceed without mask',
+                                QMessageBox.ButtonRole.AcceptRole)
+        box.addButton('Cancel', QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(proceed)
+        box.exec()
+        return box.clickedButton() is proceed
 
     def _cancel_modification(self):
         if self._worker:
@@ -1296,16 +1338,16 @@ class ModifyTab(QWidget):
     def _on_mod_result(self, index, output_path):
         self._pixmap_cache.pop(output_path, None)
 
-        if getattr(self, '_single_mode', False):
+        if self._single_mode:
             image = self.model.get_image(self._current_image_index)
             if image:
                 image.modified_path = Path(output_path)
                 self._reload_and_record(image, 'Modify')
         else:
-            images_with_masks = [img for img in self.model.images
-                                 if img.mask_path is not None]
-            if 0 <= index < len(images_with_masks):
-                image = images_with_masks[index]
+            # Index is into the list handed to the worker, which may be a
+            # subset of the model (mask-carrying images only).
+            if 0 <= index < len(self._run_images):
+                image = self._run_images[index]
                 image.modified_path = Path(output_path)
                 all_idx = self.model.images.index(image)
                 if all_idx == self._current_image_index:

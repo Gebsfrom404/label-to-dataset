@@ -8,6 +8,7 @@ import requests
 LTD_INPUT_IMAGE = 'LTD_Input_Image'
 LTD_INPUT_MASK = 'LTD_Input_Mask'
 LTD_INPUT_TEXT = 'LTD_Input_Text'
+LTD_INPUT_PROMPT = 'LTD_Input_Prompt'
 LTD_LATENT_SIZE = 'LTD_Latent_Size'
 LTD_SEED = 'LTD_Seed'
 LTD_OUTPUT_IMAGE = 'LTD_Output_Image'
@@ -204,7 +205,8 @@ def validate_detection_workflow(workflow: dict) -> tuple[bool, str]:
 def validate_modification_workflow(workflow: dict) -> tuple[bool, str]:
     """Validate a workflow for image modification.
 
-    Requires: LTD_Input_Image, LTD_Input_Mask, LTD_Output_Image.
+    Requires only: LTD_Input_Image, LTD_Output_Image.  LTD_Input_Mask and
+    LTD_Input_Prompt are optional \u2014 see ``has_input_mask`` / ``has_input_prompt``.
     """
     if not is_api_format(workflow):
         if _is_ui_format(workflow):
@@ -215,12 +217,20 @@ def validate_modification_workflow(workflow: dict) -> tuple[bool, str]:
 
     if not find_nodes_by_title(workflow, LTD_INPUT_IMAGE):
         return False, f'Missing node with title "{LTD_INPUT_IMAGE}"'
-    if not find_nodes_by_title(workflow, LTD_INPUT_MASK):
-        return False, f'Missing node with title "{LTD_INPUT_MASK}"'
     if not find_nodes_by_title(workflow, LTD_OUTPUT_IMAGE):
         return False, f'Missing node with title "{LTD_OUTPUT_IMAGE}"'
 
     return True, 'OK'
+
+
+def has_input_mask(workflow: dict) -> bool:
+    """True if the workflow declares an LTD_Input_Mask node."""
+    return bool(find_nodes_by_title(workflow, LTD_INPUT_MASK))
+
+
+def has_input_prompt(workflow: dict) -> bool:
+    """True if the workflow declares an LTD_Input_Prompt node."""
+    return bool(find_nodes_by_title(workflow, LTD_INPUT_PROMPT))
 
 
 def validate_caption_workflow(workflow: dict) -> tuple[bool, str]:
@@ -276,6 +286,45 @@ def set_input_text(workflow: dict, text: str):
     """Set the prompt text on all LTD_Input_Text nodes."""
     for node_id in find_nodes_by_title(workflow, LTD_INPUT_TEXT):
         workflow[node_id]['inputs']['text'] = text
+
+
+# Input keys a prompt-carrying node may expose, in preference order
+_PROMPT_KEYS = ('text', 'prompt', 'string', 'value')
+
+
+def _prompt_key(inputs: dict) -> str:
+    """Pick the input key holding the prompt string on an LTD_Input_Prompt node."""
+    for key in _PROMPT_KEYS:
+        if isinstance(inputs.get(key), str):
+            return key
+    for key in _PROMPT_KEYS:
+        if key in inputs:
+            return key
+    return 'text'
+
+
+def get_input_prompt(workflow: dict) -> str | None:
+    """Return the prompt stored in the workflow's LTD_Input_Prompt node.
+
+    Returns None when the workflow has no such node (so callers can tell
+    "no prompt node" apart from "prompt node holding an empty string").
+    """
+    node_ids = find_nodes_by_title(workflow, LTD_INPUT_PROMPT)
+    if not node_ids:
+        return None
+    for node_id in node_ids:
+        inputs = workflow[node_id].get('inputs', {})
+        value = inputs.get(_prompt_key(inputs))
+        if isinstance(value, str):
+            return value
+    return ''
+
+
+def set_input_prompt(workflow: dict, prompt: str):
+    """Set the prompt text on all LTD_Input_Prompt nodes."""
+    for node_id in find_nodes_by_title(workflow, LTD_INPUT_PROMPT):
+        inputs = workflow[node_id].setdefault('inputs', {})
+        inputs[_prompt_key(inputs)] = prompt
 
 
 def set_latent_size(workflow: dict, width: int, height: int):

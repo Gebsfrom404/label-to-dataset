@@ -38,7 +38,8 @@ class ComfyUIDetectionModule(BaseDetectionModule):
         layout.addWidget(self._workflow_selector)
 
         info = QLabel('Required nodes: LTD_Input_Image, '
-                       'LTD_Output_Mask or LTD_Output_Image')
+                       'LTD_Output_Mask or LTD_Output_Image\n'
+                       'Optional: LTD_Input_Prompt')
         info.setWordWrap(True)
         layout.addWidget(info)
 

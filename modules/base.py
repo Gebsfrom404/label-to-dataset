@@ -66,13 +66,25 @@ class BaseModificationModule(ABC):
         into plain attributes so run() never touches Qt widgets.
         """
 
+    def wants_mask(self) -> bool:
+        """Whether run() consumes the mask. Queried after prepare().
+
+        Modules that always need one (e.g. LaMa) keep the default. Modules
+        whose mask use depends on configuration — such as a ComfyUI workflow
+        with or without an ``LTD_Input_Mask`` node — override this. When it
+        returns False the tab passes ``mask_path=None`` and runs images that
+        have no mask at all.
+        """
+        return True
+
     @abstractmethod
-    def run(self, image_path: Path, mask_path: Path, **kwargs) -> Path:
+    def run(self, image_path: Path, mask_path: Path | None, **kwargs) -> Path:
         """Run modification on a single image.
 
         Args:
             image_path: Path to the original image
-            mask_path: Path to the binary mask (white=area to modify)
+            mask_path: Path to the binary mask (white=area to modify), or
+                None when the module reported ``wants_mask() == False``
 
         Returns:
             Path to the modified image

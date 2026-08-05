@@ -6,7 +6,8 @@ from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 from modules.base import BaseModificationModule
 from ltd.comfyui.client import ComfyUIClient
-from ltd.comfyui.workflow import (load_workflow, validate_modification_workflow,
+from ltd.comfyui.workflow import (has_input_mask, load_workflow,
+                                   validate_modification_workflow,
                                    set_input_image, set_input_mask)
 from ltd.utils.file_utils import get_temp_dir_no_clear
 from ltd.widgets.workflow_selector import WorkflowSelector
@@ -20,6 +21,7 @@ class ComfyUIModificationModule(BaseModificationModule):
         self._workflow_text = ''
         self._prepared_workflow = None
         self._client = None
+        self._wants_mask = False
 
     @property
     def name(self) -> str:
@@ -37,8 +39,8 @@ class ComfyUIModificationModule(BaseModificationModule):
         self._workflow_selector = WorkflowSelector(settings_key='modification')
         layout.addWidget(self._workflow_selector)
 
-        info = QLabel('Required nodes: LTD_Input_Image, '
-                       'LTD_Input_Mask, LTD_Output_Image')
+        info = QLabel('Required nodes: LTD_Input_Image, LTD_Output_Image\n'
+                       'Optional: LTD_Input_Mask, LTD_Input_Prompt')
         info.setWordWrap(True)
         layout.addWidget(info)
 
@@ -66,25 +68,33 @@ class ComfyUIModificationModule(BaseModificationModule):
             raise ValueError(f'Workflow validation failed: {msg}')
 
         self._prepared_workflow = workflow
+        self._wants_mask = has_input_mask(workflow)
         self._client = ComfyUIClient()
         if not self._client.health_check():
             self._client = None
             raise ConnectionError('Cannot connect to ComfyUI')
 
-    def run(self, image_path: Path, mask_path: Path, **kwargs) -> Path:
+    def wants_mask(self) -> bool:
+        """Only workflows with an LTD_Input_Mask node consume the mask."""
+        return self._wants_mask
+
+    def run(self, image_path: Path, mask_path: Path | None, **kwargs) -> Path:
         if not self._prepared_workflow:
             raise ValueError('No workflow provided (call prepare() first)')
         if not self._client:
             raise ConnectionError('ComfyUI client not ready')
+        if self._wants_mask and mask_path is None:
+            raise ValueError('Workflow requires mask')
 
         # Deep copy so set_input_* doesn't mutate the template
         workflow = copy.deepcopy(self._prepared_workflow)
 
-        # Upload image and mask
+        # Upload image and (when the workflow takes one) mask
         img_result = self._client.upload_image(image_path)
-        mask_result = self._client.upload_image(mask_path)
         set_input_image(workflow, img_result.get('name', image_path.name))
-        set_input_mask(workflow, mask_result.get('name', mask_path.name))
+        if self._wants_mask and mask_path is not None:
+            mask_result = self._client.upload_image(mask_path)
+            set_input_mask(workflow, mask_result.get('name', mask_path.name))
 
         # Run
         output_dir = get_temp_dir_no_clear('comfyui_modification_output')

@@ -160,8 +160,10 @@ class LamaInpaintModule(BaseModificationModule):
         model.load_state_dict(state_dict, strict=True)
         self._model = model.to(device).eval()
 
-    def run(self, image_path: Path, mask_path: Path, **kwargs) -> Path:
+    def run(self, image_path: Path, mask_path: Path | None, **kwargs) -> Path:
         self._ensure_model()
+        if mask_path is None:
+            raise ValueError('LaMa inpainting requires a mask')
 
         from ltd.utils.file_utils import cv_imread
         image = cv_imread(image_path)

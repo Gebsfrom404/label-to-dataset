@@ -14,6 +14,7 @@ Two base classes:
 **`BaseModificationModule`** — for image modification (LaMa inpaint, ComfyUI)
 - Same pattern: `name`, `get_settings_widget()`, `prepare()`
 - `run(image_path, mask_path, **kwargs) → Path` → returns path to modified image
+- `wants_mask() → bool` (default `True`) → queried by the Modify tab **after** `prepare()`. Return `False` when the module ignores masks for the current configuration (e.g. a ComfyUI workflow with no `LTD_Input_Mask` node); the tab then passes `mask_path=None` and includes maskless images in the run. See comfyui-integration.md for the full matrix.
 
 ## Discovery (`modules/__init__.py`)
 

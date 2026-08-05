@@ -123,3 +123,11 @@ The delete does **not** notify the Label tab, so its list still shows the (now m
 ## ModificationWorker — Module Unload
 
 After batch modification completes (or is cancelled), the worker calls `module.unload()` if it exists. This allows modules to free GPU memory (e.g., LaMa model). The `unload()` method is optional — not part of the ABC.
+
+## Tab Key Filters Swallowed Typing in Text Fields
+
+`LabelTab` and `ModifyTab` call `_install_space_filter()`, which installs the tab as an event filter on **every** child widget (`self.findChildren(QWidget)`). Their `eventFilter` then intercepted Space (canvas pan toggle) and — in ModifyTab — `A`/`D`/PgUp/PgDown (image navigation) unconditionally, returning `True`. Any text field inside the tab therefore lost those keys: typing in the ComfyUI `LTD_Input_Prompt` box or the Custom-JSON area moved to the next image instead of inserting a character.
+
+Both filters now bail out via `text_input_has_focus()` (`ltd/utils/qt_utils.py`) before touching the key, so the focused `QLineEdit` / `QPlainTextEdit` / `QTextEdit` / `QAbstractSpinBox` / editable `QComboBox` gets the event. With focus anywhere else the old pan/navigation behaviour is unchanged.
+
+`QShortcut`-based single-letter bindings (`M`/`R`/`V`/`B`/`C`/`1`/`2` in ModifyTab, `A`/`D`/`W`/`S` in LabelTab) never had this problem — `QWidgetTextControl` accepts the `ShortcutOverride` event for text-inserting keys, so an editable text widget wins before the shortcut fires. Only hand-rolled event filters need the guard.
