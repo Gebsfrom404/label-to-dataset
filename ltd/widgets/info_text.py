@@ -164,11 +164,13 @@ MODIFY_SHORTCUTS_GLOBAL = _section('Tools', [
 CAPTION_SHORTCUTS_GLOBAL = _section('Files', [
     ('Ctrl+S', 'Save tags to disk'),
 ])
-CAPTION_SHORTCUTS_TAGS_LIST = _section('Image tags list', [
+CAPTION_SHORTCUTS_TAGS_LIST = _section('Tag lists (Image / All)', [
     ('Up / Down', 'Move (rolls over to next image at edges)'),
     ('PgUp / PgDown', 'Previous / next image'),
     ('Delete / Backspace', 'Delete selected tag(s)'),
-    ('Double-click', 'Inline edit'),
+    ('Ctrl+C', 'Copy selected tag(s)'),
+    ('Right-click', 'Filter images by selected tag(s) — ANDed'),
+    ('Double-click', 'Inline edit (image tags) / rename (all tags)'),
     ('Drag', 'Reorder'),
 ])
 CAPTION_SHORTCUTS_INPUT = _section('Tag input', [

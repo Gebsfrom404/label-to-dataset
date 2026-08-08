@@ -36,7 +36,7 @@ Each tab is a QWidget in `ltd/tabs/`. MainWindow holds them in a QTabWidget and 
 | Info button | `ltd/widgets/info_button.py` | Small "ⓘ" QToolButton with rich-text tooltip. `InfoButton(html)` is static; `DynamicInfoButton(provider)` calls a `() → str` each time so content can change with focus. `focus_in(widget)` helper checks if a widget contains `QApplication.focusWidget()` |
 | Info text | `ltd/widgets/info_text.py` | All filter-grammar and shortcut help strings, one per filter widget / tab section (e.g. `LABEL_FILTER_HELP`, `CAPTION_SHORTCUTS_INPUT`, `GEN_SHORTCUTS_LIST`). Tabs build focus-aware help by concatenating sections that match `focus_in()` |
 | Label image list | `ltd/widgets/label_image_list.py` | Image list with filter proxy (by label count, class, filename) |
-| Caption image list | `ltd/widgets/caption_image_list.py` | Image list with filter, multi-select, context menu (copy/move/delete, Open in Default App, Open in Modify) |
+| Caption image list | `ltd/widgets/caption_image_list.py` | Image list with filter, multi-select, context menu (copy/move/delete, Open in Default App, Open in Modify). Menu shortcuts are `WidgetWithChildrenShortcut`-scoped — they need focus in the list |
 | Gen image list | `ltd/widgets/gen_image_list.py` | Image list for Manage Gen Images tab; multi-select; context menu with Copy Prompt (Ctrl+C), Copy Image to..., Move Image to... (Ctrl+M); extends CaptionImageList's filter grammar with `WxH`, `size:`, `w:`, `h:`, `meta:`, `format:` terms |
 | Tag dictionary | `ltd/data/tag_dictionary.py` | CSV tag database loader (danbooru/e621), category colors, autocomplete search |
 | Tag completer popup | `ltd/widgets/tag_completer_popup.py` | Custom autocomplete popup with colored tags and post counts |
@@ -53,6 +53,15 @@ Each tab is a QWidget in `ltd/tabs/`. MainWindow holds them in a QTabWidget and 
 - **Label → Train**: `dataset_saved` sets dataset path; `copy_to_train_requested` sets path + model type and switches tab
 - Signals emitted by tabs, connected in `MainWindow._connect_tab_signals()`
 - "Include unlabeled images" checkbox in Label tab controls all output ops
+
+## Caption Tab Tag Lists
+
+Both right-panel tag lists (`EditableTagsList` = Image Tags, `AllTagsList` = All Tags) support multi-select with the same two actions, via context menu or Ctrl+C:
+
+- `filter_by_tags_requested(list, bool)` → `CaptionTab._filter_by_tags(tags, append)` — writes `tag:a and tag:b …` into the image-list filter box, so a multi-select filters on **all** selected tags. `append=True` ANDs onto the existing filter (wrapping it in parens first when it contains `or`, and skipping terms already present).
+- `copy_tags_requested(list)` → `CaptionTab._copy_tags_to_clipboard()` — comma-joined, matching `CaptionImageList._copy_tags`, so copied tags paste back through its Paste Tags.
+
+`selected_tags()` on each list returns the selection in list order; `AllTagsList` strips the ` (count)` suffix. A right-click outside the selection falls back to the clicked tag alone.
 
 ## Extras Tab
 

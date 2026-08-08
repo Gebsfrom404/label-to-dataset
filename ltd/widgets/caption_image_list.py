@@ -118,6 +118,11 @@ class ImageFilterProxyModel(QSortFilterProxyModel):
             tokens.append(buf)
         return tokens
 
+    @classmethod
+    def tokenize(cls, text: str) -> list[str]:
+        """Public alias — callers building filter text need the same rules."""
+        return cls._tokenize(text)
+
     # -- term parser --
 
     def _parse_term(self, token: str) -> tuple:
@@ -401,9 +406,14 @@ class CaptionImageList(QWidget):
             'Open in Modify')
         self._act_open_in_modify.triggered.connect(self._open_in_modify)
 
-        # Register shortcuts on list_view so they work without menu open
+        # Register shortcuts on list_view so they work without menu open.
+        # Scope them to this widget: QAction defaults to WindowShortcut, so
+        # Ctrl+C here used to fire anywhere in the Caption tab and swallowed
+        # the tag lists' own Ctrl+C (copy selected tags).
         for act in self.context_menu.actions():
             if not act.isSeparator():
+                act.setShortcutContext(
+                    Qt.ShortcutContext.WidgetWithChildrenShortcut)
                 self.list_view.addAction(act)
 
     def _connect_signals(self):

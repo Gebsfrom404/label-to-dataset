@@ -137,3 +137,9 @@ Both filters now bail out via `text_input_has_focus()` (`ltd/utils/qt_utils.py`)
 `CaptionTab.separator_input` sits below `right_tabs` and was the next widget in the focus chain after the last panel field. Tab from the bottom of a right-panel tab page — or Qt's focus-chain walk when `_set_caption_mode_tabs()` hides the page that holds focus — silently landed there, and unnoticed typing rewrote the separator used by every `save_tags_to_file()` / `_parse_caption_text()` call, corrupting tag files on the next save.
 
 Two guards: the field is `Qt.FocusPolicy.ClickFocus` (deliberate mouse click only, never Tab or the focus-chain walk), and `_set_caption_mode_tabs()` snapshots `QApplication.focusWidget()` before toggling tab visibility, then `_restore_panel_focus()` hands focus back — to the same widget if it is still visible, otherwise to `caption_edit` / `tag_input` for the new mode. Focus that never moved (e.g. `panel_mode_combo` during keyboard navigation) is left alone.
+
+## Caption Tab: Image-List QActions Were Window-Wide Shortcuts
+
+`CaptionImageList._setup_context_menu()` registers its context-menu actions on `list_view` so their shortcuts work without opening the menu — but `QAction` defaults to `Qt.WindowShortcut`, so Ctrl+C / Ctrl+M / Ctrl+O / Ctrl+Shift+Del fired from anywhere in the Caption tab, not just the image list. That silently swallowed Ctrl+C in the tag lists (`QListWidget` doesn't accept `ShortcutOverride` for it, unlike text widgets, which is why the tag input and caption box were never affected).
+
+They now get `Qt.ShortcutContext.WidgetWithChildrenShortcut`, matching `GenImagesTab._make_tag_copy_action`. Consequence: those shortcuts require focus inside the image list. Ctrl+C is now context-sensitive — image list copies captions, tag list copies the selected tags.

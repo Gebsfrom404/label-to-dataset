@@ -399,11 +399,43 @@ class CaptionImageGenerator:
 # Editable Tags List (supports inline edit, delete key, drag-drop)
 # ---------------------------------------------------------------------------
 
+def _filter_action_text(tags: list[str]) -> str:
+    if len(tags) == 1:
+        return f'Filter images by "{tags[0]}"'
+    return f'Filter images by all {len(tags)} tags'
+
+
+def _add_filter_action_text(tags: list[str]) -> str:
+    if len(tags) == 1:
+        return f'Add "{tags[0]}" to filter'
+    return f'Add {len(tags)} tags to filter'
+
+
+def _copy_action_text(tags: list[str]) -> str:
+    return 'Copy Tag\tCtrl+C' if len(tags) == 1 \
+        else f'Copy {len(tags)} Tags\tCtrl+C'
+
+
+def _tag_filter_term(tag: str) -> str:
+    """One `tag:` term for the image-list filter grammar.
+
+    Quotes are needed for anything the tokenizer would split or treat as
+    syntax — spaces and parentheses.
+    """
+    if any(ch in tag for ch in ' ()"\''):
+        escaped = tag.replace('"', '')
+        return f'tag:"{escaped}"'
+    return f'tag:{tag}'
+
 class EditableTagsList(QListWidget):
     """Tags list with drag-drop reorder, inline editing, Delete key."""
     tags_changed = Signal()
     tags_delete_requested = Signal(list)  # list of tag strings
     navigate_image = Signal(int)  # -1 = prev, +1 = next
+    # (tags, append) — AND-filter on these tags, replacing or extending
+    # whatever is already in the image-list filter box.
+    filter_by_tags_requested = Signal(list, bool)
+    copy_tags_requested = Signal(list)       # copy these tags to clipboard
 
     _HIGHLIGHT_BRUSH = QBrush(QColor(255, 200, 50, 70))
     _CLEAR_BRUSH = QBrush()
@@ -418,9 +450,41 @@ class EditableTagsList(QListWidget):
             QAbstractItemView.EditTrigger.EditKeyPressed)
         self.model().rowsMoved.connect(lambda: self.tags_changed.emit())
         self.itemChanged.connect(lambda: self.tags_changed.emit())
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._show_context_menu)
         self._highlight_patterns: list[tuple] = []
         self._tag_dict: TagDictionary | None = None
         self._dark_theme = True
+
+    def selected_tags(self) -> list[str]:
+        """Selected tag names, in list order."""
+        return [self.item(row).text()
+                for row in sorted(idx.row() for idx in self.selectedIndexes())]
+
+    def _menu_tags(self, item) -> list[str]:
+        """Tags a context menu should act on — the selection, or the item
+        under the cursor when the right-click landed outside it."""
+        tags = self.selected_tags()
+        if item is not None and item.text() not in tags:
+            return [item.text()]
+        return tags
+
+    def _show_context_menu(self, pos):
+        tags = self._menu_tags(self.itemAt(pos))
+        if not tags:
+            return
+        menu = QMenu(self)
+        act_copy = menu.addAction(_copy_action_text(tags))
+        menu.addSeparator()
+        act_filter = menu.addAction(_filter_action_text(tags))
+        act_add_filter = menu.addAction(_add_filter_action_text(tags))
+        action = menu.exec(self.mapToGlobal(pos))
+        if action == act_filter:
+            self.filter_by_tags_requested.emit(tags, False)
+        elif action == act_add_filter:
+            self.filter_by_tags_requested.emit(tags, True)
+        elif action == act_copy:
+            self.copy_tags_requested.emit(tags)
 
     def set_tag_dictionary(self, tag_dict: TagDictionary | None,
                            dark: bool = True):
@@ -428,6 +492,12 @@ class EditableTagsList(QListWidget):
         self._dark_theme = dark
 
     def keyPressEvent(self, event):
+        if (event.key() == Qt.Key.Key_C
+                and event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+            tags = self.selected_tags()
+            if tags:
+                self.copy_tags_requested.emit(tags)
+            return
         if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
             tags = [self.item(idx.row()).text()
                     for idx in self.selectedIndexes()]
@@ -524,7 +594,8 @@ class AllTagsList(QListWidget):
     """All-tags list with delete key, right-click context menu."""
     delete_tags_requested = Signal(list)  # list of tag names
     add_to_image_requested = Signal(str)  # single tag name
-    filter_by_tag_requested = Signal(str)  # single tag name
+    filter_by_tags_requested = Signal(list, bool)  # tags, append to filter
+    copy_tags_requested = Signal(list)       # copy these tags to clipboard
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -538,41 +609,53 @@ class AllTagsList(QListWidget):
         text = item.text()
         return text.rsplit(' (', 1)[0] if ' (' in text else text
 
+    def selected_tags(self) -> list[str]:
+        """Selected tag names (counts stripped), in list order."""
+        return [self._get_tag_at(self.item(row))
+                for row in sorted(idx.row() for idx in self.selectedIndexes())]
+
     def _show_context_menu(self, pos):
         item = self.itemAt(pos)
         if item is None:
             return
         tag = self._get_tag_at(item)
+        # A right-click outside the selection acts on the clicked tag alone.
+        tags = self.selected_tags()
+        if tag not in tags:
+            tags = [tag]
 
         menu = QMenu(self)
         act_add = menu.addAction(f'Add "{tag}" to image')
-        act_filter = menu.addAction(f'Filter images by "{tag}"')
+        act_copy = menu.addAction(_copy_action_text(tags))
         menu.addSeparator()
-        selected = self.selectedIndexes()
-        tags = []
-        if len(selected) > 1:
-            tags = [self._get_tag_at(self.item(idx.row()))
-                    for idx in selected]
-            act_delete = menu.addAction(
-                f'Delete {len(tags)} tags from all images')
-        else:
-            act_delete = menu.addAction(
-                f'Delete "{tag}" from all images')
+        act_filter = menu.addAction(_filter_action_text(tags))
+        act_add_filter = menu.addAction(_add_filter_action_text(tags))
+        menu.addSeparator()
+        act_delete = menu.addAction(
+            f'Delete "{tag}" from all images' if len(tags) == 1
+            else f'Delete {len(tags)} tags from all images')
 
         action = menu.exec(self.mapToGlobal(pos))
         if action == act_add:
             self.add_to_image_requested.emit(tag)
         elif action == act_filter:
-            self.filter_by_tag_requested.emit(tag)
+            self.filter_by_tags_requested.emit(tags, False)
+        elif action == act_add_filter:
+            self.filter_by_tags_requested.emit(tags, True)
+        elif action == act_copy:
+            self.copy_tags_requested.emit(tags)
         elif action == act_delete:
-            if len(selected) > 1:
-                self.delete_tags_requested.emit(tags)
-            else:
-                self.delete_tags_requested.emit([tag])
+            self.delete_tags_requested.emit(tags)
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_A and event.modifiers() & Qt.KeyboardModifier.ControlModifier:
             self.selectAll()
+            return
+        if (event.key() == Qt.Key.Key_C
+                and event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+            tags = self.selected_tags()
+            if tags:
+                self.copy_tags_requested.emit(tags)
             return
         if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
             tags = []
@@ -1345,6 +1428,8 @@ class CaptionTab(QWidget):
         self.tags_list.tags_changed.connect(self._on_tags_list_changed)
         self.tags_list.tags_delete_requested.connect(self._handle_tag_delete)
         self.tags_list.navigate_image.connect(self._on_page_navigate)
+        self.tags_list.filter_by_tags_requested.connect(self._filter_by_tags)
+        self.tags_list.copy_tags_requested.connect(self._copy_tags_to_clipboard)
 
         # Image viewer navigation
         self.image_viewer.navigate_image.connect(self._on_page_navigate)
@@ -1371,8 +1456,10 @@ class CaptionTab(QWidget):
             self._on_all_tag_double_clicked)
         self.all_tags_list.add_to_image_requested.connect(
             self._add_tag_to_image)
-        self.all_tags_list.filter_by_tag_requested.connect(
-            self._filter_by_tag)
+        self.all_tags_list.filter_by_tags_requested.connect(
+            self._filter_by_tags)
+        self.all_tags_list.copy_tags_requested.connect(
+            self._copy_tags_to_clipboard)
         self.all_tags_list.delete_tags_requested.connect(
             self._delete_tags_from_all_images)
 
@@ -2668,11 +2755,41 @@ class CaptionTab(QWidget):
         self.tags_list.scrollToBottom()
         self._on_tags_list_changed()
 
-    def _filter_by_tag(self, tag: str):
-        if ' ' in tag:
-            self.image_list.filter_input.setText(f'tag:"{tag}"')
-        else:
-            self.image_list.filter_input.setText(f'tag:{tag}')
+    def _filter_by_tags(self, tags: list[str], append: bool = False):
+        """Filter the image list to images carrying *all* the given tags.
+
+        With `append`, the terms are ANDed onto the existing filter instead
+        of replacing it. An existing filter containing `or` gets wrapped in
+        parentheses first — `or` binds loosest, so `a or b and c` would
+        otherwise attach the new term to `b` alone.
+        """
+        if not tags:
+            return
+        new_terms = [_tag_filter_term(t) for t in tags]
+        current = self.image_list.filter_input.text().strip()
+        if append and current:
+            # Drop terms the filter already carries, so repeatedly adding
+            # the same tag doesn't pile up "tag:solo and tag:solo".
+            existing = self.image_list.proxy.tokenize(current)
+            new_terms = [t for t in new_terms
+                         if t not in existing
+                         and t.replace('"', '') not in existing]
+            if not new_terms:
+                return
+            if re.search(r'(^|\s)or(\s|$)', current, re.IGNORECASE):
+                current = f'({current})'
+            new_terms.insert(0, current)
+        self.image_list.filter_input.setText(' and '.join(new_terms))
+
+    def _copy_tags_to_clipboard(self, tags: list[str]):
+        """Copy tags comma-joined — same shape as the image list's Copy Tags,
+        so they paste straight back in via its Paste Tags."""
+        if not tags:
+            return
+        QApplication.clipboard().setText(', '.join(tags))
+        n = len(tags)
+        self.caption_status.setText(
+            f'Copied {n} tag{"" if n == 1 else "s"} to clipboard')
 
     def _on_all_tag_double_clicked(self, item: QListWidgetItem):
         """Double-click on all-tags: rename across all images."""
