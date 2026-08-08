@@ -131,3 +131,9 @@ After batch modification completes (or is cancelled), the worker calls `module.u
 Both filters now bail out via `text_input_has_focus()` (`ltd/utils/qt_utils.py`) before touching the key, so the focused `QLineEdit` / `QPlainTextEdit` / `QTextEdit` / `QAbstractSpinBox` / editable `QComboBox` gets the event. With focus anywhere else the old pan/navigation behaviour is unchanged.
 
 `QShortcut`-based single-letter bindings (`M`/`R`/`V`/`B`/`C`/`1`/`2` in ModifyTab, `A`/`D`/`W`/`S` in LabelTab) never had this problem — `QWidgetTextControl` accepts the `ShortcutOverride` event for text-inserting keys, so an editable text widget wins before the shortcut fires. Only hand-rolled event filters need the guard.
+
+## Caption Tab: Focus Escaped Into the Separator Field
+
+`CaptionTab.separator_input` sits below `right_tabs` and was the next widget in the focus chain after the last panel field. Tab from the bottom of a right-panel tab page — or Qt's focus-chain walk when `_set_caption_mode_tabs()` hides the page that holds focus — silently landed there, and unnoticed typing rewrote the separator used by every `save_tags_to_file()` / `_parse_caption_text()` call, corrupting tag files on the next save.
+
+Two guards: the field is `Qt.FocusPolicy.ClickFocus` (deliberate mouse click only, never Tab or the focus-chain walk), and `_set_caption_mode_tabs()` snapshots `QApplication.focusWidget()` before toggling tab visibility, then `_restore_panel_focus()` hands focus back — to the same widget if it is still visible, otherwise to `caption_edit` / `tag_input` for the new mode. Focus that never moved (e.g. `panel_mode_combo` during keyboard navigation) is left alone.

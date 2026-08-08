@@ -1282,6 +1282,10 @@ class CaptionTab(QWidget):
         sep_layout.addWidget(QLabel('Separator:'))
         self.separator_input = QLineEdit(', ')
         self.separator_input.setFixedWidth(80)
+        # Click-only focus: it must never be reachable by Tab or by Qt's
+        # focus-chain walk, since stray typing here silently rewrites the
+        # separator every tag save and caption split uses.
+        self.separator_input.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         self.separator_input.setToolTip(
             'Tag separator for reading/writing files. '
             'Supports escape sequences: \\n (newline), \\t (tab)')
@@ -1635,11 +1639,33 @@ class CaptionTab(QWidget):
         Auto-Caption and Tools stay visible in both modes.
         """
         tabs = self.right_tabs
+        # Hiding the page that currently holds focus makes Qt walk the focus
+        # chain and hand focus to the next widget below the tab widget — the
+        # separator field. Snapshot focus and put it somewhere deliberate.
+        focus_before = QApplication.focusWidget()
         tabs.setTabVisible(tabs.indexOf(self.caption_panel), is_caption)
         tabs.setTabVisible(tabs.indexOf(self.image_tags_tab), not is_caption)
         tabs.setTabVisible(tabs.indexOf(self.all_tags_tab), not is_caption)
         tabs.setCurrentWidget(
             self.caption_panel if is_caption else self.image_tags_tab)
+        self._restore_panel_focus(focus_before, is_caption)
+
+    def _restore_panel_focus(self, previous, is_caption: bool):
+        """Undo focus that Qt moved on its own while tabs were hidden.
+
+        Leaves focus alone when nothing moved it (e.g. the mode combo box
+        keeps focus during keyboard navigation); otherwise gives it back to
+        the previous widget, or to the editor for the new mode when that
+        widget is the one that just got hidden.
+        """
+        if QApplication.focusWidget() is previous:
+            return
+        if (previous is not None and previous.isVisible()
+                and previous.isEnabled()):
+            previous.setFocus()
+            return
+        target = self.caption_edit if is_caption else self.tag_input
+        target.setFocus()
 
     def _on_panel_mode_changed(self, index: int):
         mode = 'caption' if index == 1 else 'tags'
