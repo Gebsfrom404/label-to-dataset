@@ -778,6 +778,8 @@ class CaptionImageViewer(QGraphicsView):
 # ---------------------------------------------------------------------------
 
 class CaptionTab(QWidget):
+    open_in_modify_requested = Signal(list)  # list[ImageItem]
+
     _PIXMAP_CACHE_MAX = 5
     # Highlight colour for caption search matches (matches the tags-list one).
     _CAPTION_SEARCH_BRUSH = QColor(255, 200, 50, 110)
@@ -1315,6 +1317,8 @@ class CaptionTab(QWidget):
         self.image_list.load_directory_requested.connect(self._load_directory)
         self.image_list.tags_paste_requested.connect(self._on_tags_pasted)
         self.image_list.images_deleted.connect(self._on_images_deleted)
+        self.image_list.open_in_modify_requested.connect(
+            self._on_open_in_modify)
         self.image_list.filter_input.textChanged.connect(
             self._update_tag_highlights)
 
@@ -2156,6 +2160,25 @@ class CaptionTab(QWidget):
             self._sync_caption_view()
         self._rebuild_all_tags()
         self._update_token_count()
+
+    def _on_open_in_modify(self, images: list[ImageItem]):
+        """Hand the selected images to the Modify tab.
+
+        Fresh ImageItems are built rather than passing this model's own —
+        Modify mutates width/height/modified_path as it works, and that
+        must not leak back into the caption list. Paths point at the
+        originals, so Modify's "save in place" writes back here.
+        """
+        if not images:
+            return
+        items = []
+        for img in images:
+            mask_path = img.path.parent / f'{img.name}-masklabel.png'
+            items.append(ImageItem(
+                path=img.path, width=img.width, height=img.height,
+                mask_path=mask_path if mask_path.exists() else None,
+                relative_path=img.relative_path))
+        self.open_in_modify_requested.emit(items)
 
     def _preview_max_dim(self) -> int:
         # Preview is a transient flash: full-res swaps in via

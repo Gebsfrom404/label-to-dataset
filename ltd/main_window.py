@@ -61,6 +61,9 @@ class MainWindow(QMainWindow):
         # Modify → Caption
         self.modify_tab.copy_to_caption_requested.connect(
             self._on_copy_to_caption)
+        # Caption → Modify
+        self.caption_tab.open_in_modify_requested.connect(
+            self._on_open_in_modify)
         # Label → Train (dataset path)
         self.label_tab.dataset_saved.connect(self._on_dataset_saved)
         self.label_tab.copy_to_train_requested.connect(
@@ -73,6 +76,10 @@ class MainWindow(QMainWindow):
     def _on_copy_to_caption(self, folder_path: str):
         self.caption_tab._load_directory(folder_path)
         self.tab_widget.setCurrentWidget(self.caption_tab)
+
+    def _on_open_in_modify(self, items):
+        self.modify_tab.load_from_label_tab(items)
+        self.tab_widget.setCurrentWidget(self.modify_tab)
 
     def _on_dataset_saved(self, path: str):
         self.train_tab.set_dataset_path(path)

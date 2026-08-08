@@ -296,6 +296,7 @@ class CaptionImageList(QWidget):
     load_directory_requested = Signal(str)
     tags_paste_requested = Signal(list, list)  # tags, source indices
     images_deleted = Signal()                # after images removed from disk
+    open_in_modify_requested = Signal(list)  # list of selected ImageItem
 
     def __init__(self, model: ImageListModel, parent=None):
         super().__init__(parent)
@@ -396,6 +397,10 @@ class CaptionImageList(QWidget):
         self._act_open.setShortcut('Ctrl+O')
         self._act_open.triggered.connect(self._open_image)
 
+        self._act_open_in_modify = self.context_menu.addAction(
+            'Open in Modify')
+        self._act_open_in_modify.triggered.connect(self._open_in_modify)
+
         # Register shortcuts on list_view so they work without menu open
         for act in self.context_menu.actions():
             if not act.isSeparator():
@@ -466,6 +471,7 @@ class CaptionImageList(QWidget):
         self._act_move_images.setText(f'Move Image{s} to...')
         self._act_copy_images.setText(f'Copy Image{s} to...')
         self._act_delete_images.setText(f'Delete Image{s} with Tags')
+        self._act_open_in_modify.setText(f'Open Image{s} in Modify')
         self._act_open.setVisible(count == 1)
 
     def _show_context_menu(self, pos):
@@ -644,6 +650,11 @@ class CaptionImageList(QWidget):
         if images:
             QDesktopServices.openUrl(
                 QUrl.fromLocalFile(str(images[0].path)))
+
+    def _open_in_modify(self):
+        images = self.get_selected_images()
+        if images:
+            self.open_in_modify_requested.emit(images)
 
     def _delete_images_with_tags(self):
         rows = self.selected_source_rows()
