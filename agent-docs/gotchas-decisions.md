@@ -120,6 +120,15 @@ The delete does **not** notify the Label tab, so its list still shows the (now m
 
 `LabelTab._undo_stacks` and `CaptionTab._undo_stacks` / `_redo_stacks` are `dict[row_index, ...]`. Removing a row shifts every later image down one, so the stacks silently attach to the wrong images. `LabelTab._delete_current_image` remaps them (`{i - 1 if i > row else i}`); **CaptionTab does not** — its delete path leaves undo history misaligned. ModifyTab sidesteps this entirely by keying `_image_histories` on `id(image)`.
 
+## Run All Lost History for Every Image Except the Displayed One
+
+`_on_mod_result` used to record a history entry only when the finished image was the one on the canvas; for the rest it set `modified_path` and stopped. The image *looked* modified, but:
+
+- never-visited images got their `Start` entry built from the already-modified state on the next switch, so the step could not be undone;
+- previously-visited images kept a stale saved history whose entries all carry `modified_path=None` — clicking any of them silently reverted the modification.
+
+Fixed by `_record_offscreen()` (lazy, path-only entries materialized on switch) — see "Off-screen entries" in data-formats-storage.md. The same change dropped `_single_mode`: "Run Current" wrote its result to `model.get_image(self._current_image_index)`, i.e. to whatever image the user had navigated to while the run was in flight, instead of the one that was actually processed.
+
 ## ModificationWorker — Module Unload
 
 After batch modification completes (or is cancelled), the worker calls `module.unload()` if it exists. This allows modules to free GPU memory (e.g., LaMa model). The `unload()` method is optional — not part of the ABC.

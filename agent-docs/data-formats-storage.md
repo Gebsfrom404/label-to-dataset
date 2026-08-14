@@ -178,6 +178,16 @@ Per-image mask edit history: `_image_histories[id(ImageItem)] = (history_list, h
 - Entries capture full state (mask QImage, pixmap, paths, dims, **labels**); max 50 entries. Labels are in the snapshot because crop/split re-normalize them — read old entries with `entry.get('labels', ...)`, they predate the key
 - `_history_navigate` re-displays labels only when `need_image_reload` is set (otherwise the existing canvas items are still correct)
 
+### Off-screen entries (Run All)
+
+A batch modification changes every image while only one is on the canvas, so `_on_mod_result` records the non-current ones through `_record_offscreen()` instead of `_reload_and_record()`:
+
+- `_make_lazy_entry()` stores metadata plus `source_path` (the display path at that state) and leaves `mask`/`pixmap` as `None` — a preview-sized pixmap + mask per image would be hundreds of MB over a full folder
+- the image's first off-screen edit seeds a `Start` entry from the *pre*-modification `modified_path`, so the step is undoable
+- `_materialize_entry()` fills `pixmap` (via `_load_cached`) and `mask` (`_mask_snapshot_from_file`, black when the image has none) in place. `_on_image_changed` materializes the whole restored history at switch time — **not** lazily on navigate: `_save_mask_buffer` writes one file per image name, so the first brush stroke would overwrite the mask those entries point at. `_history_navigate` still materializes defensively and bails if the file is gone
+- results are attributed by `id(image) == self._current_image_id`, never by `model.images.index()` — `ImageItem` equality can match a twin, and the user may switch images mid-run (single-image runs included, which is why there is no `_single_mode` flag any more)
+- off-screen results also call `model.invalidate_thumbnail(row)`; the current-image path gets that from `_reload_and_record`
+
 ## Restore Base State (Modify Tab)
 
 `_base_state[id(ImageItem)] = (mask_path, width, height, labels)` — the as-loaded state, captured by `_remember_base_state()` in `load_from_label_tab`, `_load_directory`, and for the two items `_apply_split` inserts.

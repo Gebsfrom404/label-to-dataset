@@ -92,11 +92,10 @@ class ModifyTab(QWidget):
         self._current_image_index = -1
         self._current_image_id: int | None = None
         self._worker: ModificationWorker | None = None
-        self._single_mode = False
         # Images handed to the running worker, in worker index order
         self._run_images: list[ImageItem] = []
         self._class_colors: list[str] = list(DEFAULT_COLORS)
-        self._pixmap_cache: OrderedDict[str, object] = OrderedDict()
+        self._pixmap_cache: OrderedDict[str, QPixmap | None] = OrderedDict()
         self._active_tool = None  # Track which tool is active (Tool enum or str)
         # Mask edit history per image, keyed by id(ImageItem) so entries
         # follow the object through row shifts, inserts, and folder reloads.
@@ -105,6 +104,9 @@ class ModifyTab(QWidget):
         #   name: str, mask: QImage, pixmap: QPixmap,
         #   modified_path: Path|None, mask_path: Path|None,
         #   width: int, height: int
+        # Entries recorded for an image that isn't on the canvas (Run All)
+        # start out lazy: mask/pixmap are None and 'source_path' holds the
+        # image to load them from — see _materialize_entry.
         self._image_histories: dict[int, tuple[list, int]] = {}
         # As-loaded (mask_path, width, height, labels) per image, keyed by
         # id(ImageItem). Crop/split overwrite mask_path with a crop-sized
@@ -790,6 +792,11 @@ class ModifyTab(QWidget):
             saved_history, saved_pos = self._image_histories[key]
             self._mask_history = list(saved_history)
             self._history_pos = saved_pos
+            # Entries recorded off-screen only hold paths. Resolve them now,
+            # while the mask file on disk is still the one they refer to —
+            # the next brush stroke overwrites it.
+            for entry in self._mask_history:
+                self._materialize_entry(entry)
             self._sync_history_list()
         else:
             self._history_init()
@@ -838,6 +845,82 @@ class ModifyTab(QWidget):
             'height': image.height,
             'labels': list(image.labels),
         }
+
+    def _make_lazy_entry(self, image: ImageItem, name: str,
+                         modified_path) -> dict:
+        """History entry for an image that isn't on the canvas.
+
+        Holds no mask/pixmap — those would be a full preview-sized copy per
+        image, and Run All touches every loaded image. _materialize_entry
+        loads them from disk when the image is actually displayed.
+        """
+        return {
+            'name': name,
+            'mask': None,
+            'pixmap': None,
+            'source_path': modified_path if modified_path else image.path,
+            'modified_path': modified_path,
+            'mask_path': image.mask_path,
+            'width': image.width,
+            'height': image.height,
+            'labels': list(image.labels),
+        }
+
+    def _materialize_entry(self, entry: dict) -> bool:
+        """Load a lazy entry's pixmap/mask from disk. True if usable."""
+        if entry.get('pixmap') is not None:
+            return True
+        source = entry.get('source_path')
+        if source is None:
+            return False
+        pixmap = self._load_cached(source)
+        if pixmap is None or pixmap.isNull():
+            return False
+        entry['pixmap'] = pixmap
+        entry['mask'] = self._mask_snapshot_from_file(
+            entry.get('mask_path'), pixmap.width(), pixmap.height())
+        return True
+
+    @staticmethod
+    def _mask_snapshot_from_file(mask_path, width: int,
+                                 height: int) -> QImage:
+        """Preview-sized mask buffer read from disk (black if there is none)."""
+        if mask_path and Path(mask_path).exists():
+            loaded = QImage(str(mask_path))
+            if not loaded.isNull():
+                if loaded.width() != width or loaded.height() != height:
+                    loaded = loaded.scaled(
+                        width, height,
+                        Qt.AspectRatioMode.IgnoreAspectRatio,
+                        Qt.TransformationMode.FastTransformation)
+                return loaded.convertToFormat(
+                    QImage.Format.Format_Grayscale8)
+        mask = QImage(width, height, QImage.Format.Format_Grayscale8)
+        mask.fill(Qt.GlobalColor.black)
+        return mask
+
+    def _record_offscreen(self, image: ImageItem, action_name: str,
+                          prev_modified_path):
+        """Record an edit to an image that isn't the one on the canvas.
+
+        Run All modifies every loaded image while the user sits on one of
+        them; without this the rest would either lose the step entirely or
+        keep a stale snapshot that a later navigate would restore, silently
+        undoing the modification.
+        """
+        key = id(image)
+        history, pos = self._image_histories.get(key, ([], -1))
+        history = list(history)
+        if not history:
+            history.append(
+                self._make_lazy_entry(image, 'Start', prev_modified_path))
+        elif pos < len(history) - 1:
+            history = history[:pos + 1]
+        history.append(
+            self._make_lazy_entry(image, action_name, image.modified_path))
+        if len(history) > self._HISTORY_MAX:
+            history.pop(0)
+        self._image_histories[key] = (history, len(history) - 1)
 
     def _history_init(self):
         """Reset history with current state as 'Start'."""
@@ -891,8 +974,10 @@ class ModifyTab(QWidget):
         image = self.model.get_image(self._current_image_index)
         if image is None:
             return
-        self._history_pos = pos
         entry = self._mask_history[pos]
+        if not self._materialize_entry(entry):
+            return
+        self._history_pos = pos
 
         # Check if the image itself changed (different path or dimensions)
         need_image_reload = False
@@ -1292,7 +1377,6 @@ class ModifyTab(QWidget):
                 if not self._confirm_ignore_mask(single):
                     return
 
-        self._single_mode = single
         self._run_images = images_to_run
 
         self._worker = ModificationWorker(
@@ -1338,20 +1422,24 @@ class ModifyTab(QWidget):
     def _on_mod_result(self, index, output_path):
         self._pixmap_cache.pop(output_path, None)
 
-        if self._single_mode:
-            image = self.model.get_image(self._current_image_index)
-            if image:
-                image.modified_path = Path(output_path)
-                self._reload_and_record(image, 'Modify')
-        else:
-            # Index is into the list handed to the worker, which may be a
-            # subset of the model (mask-carrying images only).
-            if 0 <= index < len(self._run_images):
-                image = self._run_images[index]
-                image.modified_path = Path(output_path)
-                all_idx = self.model.images.index(image)
-                if all_idx == self._current_image_index:
-                    self._reload_and_record(image, 'Modify')
+        # Index is into the list handed to the worker, which may be a
+        # subset of the model (mask-carrying images only).
+        if not 0 <= index < len(self._run_images):
+            return
+        image = self._run_images[index]
+        prev_modified = image.modified_path
+        image.modified_path = Path(output_path)
+
+        # Identity, not equality/index: the user is free to switch images
+        # while the run goes on, and a single-image run is no exception.
+        if id(image) == self._current_image_id:
+            self._reload_and_record(image, 'Modify')
+            return
+        self._record_offscreen(image, 'Modify', prev_modified)
+        row = next((i for i, img in enumerate(self.model.images)
+                    if img is image), -1)
+        if row >= 0:
+            self.model.invalidate_thumbnail(row)
 
     def _on_mod_finished(self):
         self.mod_progress.setVisible(False)
