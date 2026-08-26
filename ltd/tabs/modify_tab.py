@@ -5,8 +5,8 @@ from pathlib import Path
 
 from PySide6.QtCore import QEvent, Qt, QTimer, Signal
 from PySide6.QtGui import QImage, QKeySequence, QPainter, QPixmap, QShortcut
-from PySide6.QtWidgets import (QButtonGroup, QFileDialog, QGroupBox,
-                               QHBoxLayout, QLabel, QListWidget,
+from PySide6.QtWidgets import (QApplication, QButtonGroup, QFileDialog,
+                               QGroupBox, QHBoxLayout, QLabel, QListWidget,
                                QListWidgetItem, QMenu, QMessageBox,
                                QProgressBar, QPushButton, QSpinBox,
                                QSplitter, QToolButton, QVBoxLayout, QWidget)
@@ -24,9 +24,11 @@ from ltd.widgets.elided_label import ElidedLabel
 from ltd.widgets.loading_dialog import loading_dialog
 from ltd.widgets.module_selector import ModuleSelector
 from ltd.workers.modification_worker import ModificationWorker
+from ltd.workers.sam3_point_worker import Sam3PointWorker
 
 from modules.base import BaseModificationModule
 from modules import discover_modules
+from modules.sam3.engine import get_shared_engine
 
 # Internal tool names for crop/split (not in canvas Tool enum)
 _TOOL_CROP = 'crop'
@@ -92,6 +94,7 @@ class ModifyTab(QWidget):
         self._current_image_index = -1
         self._current_image_id: int | None = None
         self._worker: ModificationWorker | None = None
+        self._sam3_worker: Sam3PointWorker | None = None
         # Images handed to the running worker, in worker index order
         self._run_images: list[ImageItem] = []
         self._class_colors: list[str] = list(DEFAULT_COLORS)
@@ -165,6 +168,7 @@ class ModifyTab(QWidget):
             ('BBox (R)', Tool.BBOX),
             ('Polygon (V)', Tool.POLYGON),
             ('Brush (B)', Tool.MARKER),
+            ('Magic Wand (G)', Tool.MAGIC_WAND),
         ]
         for label, tool in canvas_tools:
             btn = QToolButton()
@@ -434,6 +438,7 @@ class ModifyTab(QWidget):
         tool_shortcuts = {
             'M': Tool.HAND, 'R': Tool.BBOX,
             'V': Tool.POLYGON, 'B': Tool.MARKER,
+            'G': Tool.MAGIC_WAND,
             'C': _TOOL_CROP,
         }
         for key, tool in tool_shortcuts.items():
@@ -605,6 +610,7 @@ class ModifyTab(QWidget):
         self.canvas.mask_updated.connect(self._on_mask_updated)
         self.canvas.label_created.connect(self._on_label_created)
         self.canvas.split_pos_changed.connect(self._on_split_pos_from_canvas)
+        self.canvas.magic_wand_requested.connect(self._on_magic_wand_requested)
 
         # Invert mask
         self.invert_mask_btn.clicked.connect(self._invert_mask)
@@ -1053,15 +1059,46 @@ class ModifyTab(QWidget):
             self.history_list.setCurrentRow(self._history_pos)
         self.history_list.blockSignals(False)
 
+    # --- Magic Wand ---
+
+    def _on_magic_wand_requested(self, x: float, y: float):
+        if self._sam3_worker is not None:
+            return
+        image = self.model.get_image(self._current_image_index)
+        if image is None:
+            return
+        image_rgb = self.canvas.get_image_rgb()
+        if image_rgb is None:
+            return
+
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        self._sam3_worker = Sam3PointWorker(get_shared_engine(), image_rgb, x, y)
+        self._sam3_worker.finished_work.connect(self._on_magic_wand_finished)
+        self._sam3_worker.error.connect(self._on_magic_wand_error)
+        self._sam3_worker.start()
+
+    def _on_magic_wand_finished(self):
+        QApplication.restoreOverrideCursor()
+        worker = self._sam3_worker
+        self._sam3_worker = None
+        if worker is not None and worker.mask is not None:
+            self.canvas.apply_mask_result(worker.mask, self.canvas.draw_mode,
+                                          source='Magic Wand')
+
+    def _on_magic_wand_error(self, message: str):
+        QApplication.restoreOverrideCursor()
+        self._sam3_worker = None
+        QMessageBox.critical(self, 'Magic Wand Error', message)
+
     # --- Canvas mask handling ---
 
-    def _on_mask_updated(self, draw_mode):
+    def _on_mask_updated(self, draw_mode, source='Brush'):
         """Save canvas mask buffer directly to file and record in history."""
         image = self.model.get_image(self._current_image_index)
         if image is None:
             return
         self._save_mask_buffer(image)
-        self._history_record('Brush')
+        self._history_record(source)
 
     def _on_label_created(self, label):
         """Handle bbox/polygon tool — paint the shape onto the mask buffer."""

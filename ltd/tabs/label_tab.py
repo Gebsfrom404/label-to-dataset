@@ -32,9 +32,11 @@ from ltd.widgets.loading_dialog import loading_dialog
 from ltd.widgets.elided_label import ElidedLabel
 from ltd.widgets.module_selector import ModuleSelector
 from ltd.workers.detection_worker import DetectionWorker
+from ltd.workers.sam3_point_worker import Sam3PointWorker
 
 from modules.base import BaseDetectionModule
 from modules import discover_modules
+from modules.sam3.engine import get_shared_engine
 
 
 class LabelTab(QWidget):
@@ -50,6 +52,7 @@ class LabelTab(QWidget):
         self.classes: list[LabelClass] = []
         self._current_image_index = -1
         self._worker: DetectionWorker | None = None
+        self._sam3_worker: Sam3PointWorker | None = None
         self._labels_dir: Path | None = None
         self._pixmap_cache: OrderedDict[str, object] = OrderedDict()
 
@@ -90,7 +93,7 @@ class LabelTab(QWidget):
         tools = [
             ('Hand (M)', Tool.HAND), ('Pointer (P)', Tool.POINTER),
             ('BBox (R)', Tool.BBOX), ('Polygon (V)', Tool.POLYGON),
-            ('Brush (B)', Tool.MARKER),
+            ('Brush (B)', Tool.MARKER), ('Magic Wand (G)', Tool.MAGIC_WAND),
         ]
         self.tool_group = QButtonGroup(self)
         self.tool_group.setExclusive(True)
@@ -270,7 +273,7 @@ class LabelTab(QWidget):
     def _setup_shortcuts(self):
         shortcuts = {
             'M': Tool.HAND, 'P': Tool.POINTER, 'R': Tool.BBOX,
-            'V': Tool.POLYGON, 'B': Tool.MARKER,
+            'V': Tool.POLYGON, 'B': Tool.MARKER, 'G': Tool.MAGIC_WAND,
         }
         for key, tool in shortcuts.items():
             sc = QShortcut(QKeySequence(key), self)
@@ -349,6 +352,7 @@ class LabelTab(QWidget):
         self.canvas.label_selected.connect(self._on_label_selected)
         self.canvas.label_modified.connect(self._on_label_modified)
         self.canvas.mask_updated.connect(self._on_mask_updated)
+        self.canvas.magic_wand_requested.connect(self._on_magic_wand_requested)
 
         self.delete_label_btn.clicked.connect(self._delete_selected_label)
         self.clear_labels_btn.clicked.connect(self._clear_all_labels)
@@ -790,6 +794,36 @@ class LabelTab(QWidget):
         self._refresh_labels_list()
         self._save_current_labels()
 
+    # --- Magic Wand ---
+
+    def _on_magic_wand_requested(self, x: float, y: float):
+        if self._sam3_worker is not None:
+            return
+        image = self.model.get_image(self._current_image_index)
+        if image is None:
+            return
+        image_rgb = self.canvas.get_image_rgb()
+        if image_rgb is None:
+            return
+
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        self._sam3_worker = Sam3PointWorker(get_shared_engine(), image_rgb, x, y)
+        self._sam3_worker.finished_work.connect(self._on_magic_wand_finished)
+        self._sam3_worker.error.connect(self._on_magic_wand_error)
+        self._sam3_worker.start()
+
+    def _on_magic_wand_finished(self):
+        QApplication.restoreOverrideCursor()
+        worker = self._sam3_worker
+        self._sam3_worker = None
+        if worker is not None and worker.mask is not None:
+            self.canvas.apply_mask_result(worker.mask, self.canvas.draw_mode)
+
+    def _on_magic_wand_error(self, message: str):
+        QApplication.restoreOverrideCursor()
+        self._sam3_worker = None
+        QMessageBox.critical(self, 'Magic Wand Error', message)
+
     def _apply_brush_with_mode(self, image, drawn_mask, current_class,
                                 w, h, mode: DrawMode):
         """Apply brush drawn_mask using Combine or Erase mode."""
@@ -1040,8 +1074,17 @@ class LabelTab(QWidget):
         self.auto_label_unlabeled_btn.setEnabled(False)
 
         try:
-            results = module.run(image.path)
+            module.prepare()
+        except Exception as e:
+            QMessageBox.critical(self, 'Module Error', str(e))
+            self.auto_label_current_btn.setEnabled(True)
+            self.auto_label_btn.setEnabled(True)
+            self.auto_label_unlabeled_btn.setEnabled(True)
+            return
+
+        try:
             class_map = self._get_class_map(module)
+            results = module.run(image.path)
             new_labels = []
             for det in results:
                 class_id = det['class_id']
@@ -1063,7 +1106,10 @@ class LabelTab(QWidget):
             self.detection_status.setText(
                 f'Added {len(new_labels)} labels to {image.filename}')
         except Exception as e:
-            QMessageBox.critical(self, 'Detection Error', str(e))
+            import traceback
+            QMessageBox.critical(
+                self, 'Detection Error',
+                f'{type(e).__name__}: {e}\n\n{traceback.format_exc()}')
         finally:
             self.auto_label_current_btn.setEnabled(True)
             self.auto_label_btn.setEnabled(True)
@@ -1080,13 +1126,12 @@ class LabelTab(QWidget):
         if module is None:
             return
 
-        class_map = self._get_class_map(module)
-
         try:
             module.prepare()
         except Exception as e:
             QMessageBox.critical(self, 'Module Error', str(e))
             return
+        class_map = self._get_class_map(module)
 
         self._worker = DetectionWorker(module, self.model.images,
                                         class_map=class_map)
@@ -1119,13 +1164,12 @@ class LabelTab(QWidget):
             QMessageBox.information(self, 'Info', 'All images already have labels.')
             return
 
-        class_map = self._get_class_map(module)
-
         try:
             module.prepare()
         except Exception as e:
             QMessageBox.critical(self, 'Module Error', str(e))
             return
+        class_map = self._get_class_map(module)
 
         self._worker = DetectionWorker(module, unlabeled,
                                         class_map=class_map)

@@ -19,6 +19,7 @@ class Tool(Enum):
     BBOX = auto()
     POLYGON = auto()
     MARKER = auto()
+    MAGIC_WAND = auto()
 
 
 class DrawMode(Enum):
@@ -36,10 +37,11 @@ class CanvasWidget(QGraphicsView):
     label_created = Signal(object)  # emits Label
     label_selected = Signal(int)  # emits label index
     label_modified = Signal(int, object)  # emits (index, Label)
-    mask_updated = Signal(object)  # emits DrawMode
+    mask_updated = Signal(object, str)  # emits (DrawMode, source label)
     drawing_started = Signal()  # emitted before first stroke of a draw action
     brush_size_changed = Signal(int)  # emits new brush size
     split_pos_changed = Signal(float)  # emits split position 0..1
+    magic_wand_requested = Signal(float, float)  # emits (x, y) in image-pixel coords
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -143,6 +145,9 @@ class CanvasWidget(QGraphicsView):
             self.setDragMode(QGraphicsView.DragMode.NoDrag)
             self.setCursor(Qt.CursorShape.CrossCursor)
         elif tool == Tool.POLYGON:
+            self.setDragMode(QGraphicsView.DragMode.NoDrag)
+            self.setCursor(Qt.CursorShape.CrossCursor)
+        elif tool == Tool.MAGIC_WAND:
             self.setDragMode(QGraphicsView.DragMode.NoDrag)
             self.setCursor(Qt.CursorShape.CrossCursor)
         elif tool in _BRUSH_TOOLS:
@@ -317,11 +322,68 @@ class CanvasWidget(QGraphicsView):
         """Return current mask buffer."""
         return self._mask_buffer
 
+    def get_image_rgb(self):
+        """Return the currently displayed image as an RGB numpy array, at
+        the same resolution the canvas is showing it at (== image_width x
+        image_height, the same space mousePressEvent's scene_pos is in).
+
+        Deliberately reads the on-screen pixmap rather than re-reading the
+        source file: tabs often display a downscaled preview
+        (`load_pixmap_preview`) for large images, and a click's (x, y) only
+        lines up with an image sampled at that same resolution — reading
+        the full-resolution file here would silently desync coordinates
+        (and mask shape) from what the user actually clicked on."""
+        if self._pixmap_item is None:
+            return None
+        import numpy as np
+        qimage = self._pixmap_item.pixmap().toImage().convertToFormat(
+            QImage.Format.Format_RGB888)
+        width = qimage.width()
+        height = qimage.height()
+        bpl = qimage.bytesPerLine()
+        ptr = qimage.bits()
+        arr = np.frombuffer(ptr, dtype=np.uint8).reshape((height, bpl))
+        return arr[:, :width * 3].reshape((height, width, 3)).copy()
+
     def clear_mask(self):
         """Clear the mask buffer."""
         if self._mask_buffer:
             self._mask_buffer.fill(Qt.GlobalColor.black)
             self._update_mask_overlay_fast()
+
+    def apply_mask_result(self, mask, mode: DrawMode | None = None,
+                          source: str = 'Magic Wand'):
+        """Combine an externally computed mask (e.g. Magic Wand) into the
+        buffer, then emit mask_updated — same New/Combine/Erase semantics
+        as a brush stroke, so existing mask_updated handlers (polygon
+        conversion in Label tab, direct save in Modify tab) apply
+        unchanged. `source` is passed through to mask_updated so a listener
+        (e.g. Modify tab's history log) can label the action correctly
+        instead of always calling it "Brush"."""
+        if self._mask_buffer is None:
+            return
+        import cv2
+        from ltd.utils.mask_utils import mask_from_qimage, qimage_from_mask
+
+        if mode is None:
+            mode = self._draw_mode
+
+        current = mask_from_qimage(self._mask_buffer)
+        binary = (mask > 127).astype(current.dtype) * 255
+        if binary.shape != current.shape:
+            # Should not normally happen (callers are expected to segment
+            # at canvas resolution via get_image_rgb()) — resize rather
+            # than silently drop the result.
+            h, w = current.shape
+            binary = cv2.resize(binary, (w, h), interpolation=cv2.INTER_NEAREST)
+        if mode == DrawMode.ERASE:
+            result = cv2.bitwise_and(current, cv2.bitwise_not(binary))
+        else:
+            result = cv2.bitwise_or(current, binary)
+
+        self._mask_buffer = qimage_from_mask(result)
+        self._update_mask_overlay_fast()
+        self.mask_updated.emit(mode, source)
 
     # --- Brush cursor ---
 
@@ -518,6 +580,8 @@ class CanvasWidget(QGraphicsView):
             elif self._current_tool == Tool.MARKER:
                 self._start_drawing(scene_pos,
                                     erase=(self._draw_mode == DrawMode.ERASE))
+            elif self._current_tool == Tool.MAGIC_WAND:
+                self.magic_wand_requested.emit(scene_pos.x(), scene_pos.y())
         elif event.button() == Qt.MouseButton.RightButton:
             if self._current_tool == Tool.POLYGON:
                 self._finish_polygon()
@@ -1144,7 +1208,7 @@ class CanvasWidget(QGraphicsView):
     def _stop_drawing(self):
         self._drawing = False
         self._update_mask_overlay_fast()
-        self.mask_updated.emit(self._draw_mode)
+        self.mask_updated.emit(self._draw_mode, 'Brush')
 
     def _draw_on_mask(self, from_pos: QPointF, to_pos: QPointF,
                       erase: bool = False):
