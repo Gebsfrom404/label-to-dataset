@@ -130,3 +130,15 @@ def mask_from_qimage(qimage) -> np.ndarray:
     ptr = qimage.bits()
     arr = np.frombuffer(ptr, dtype=np.uint8).reshape((height, bpl))
     return arr[:, :width].copy()
+
+
+def qimage_from_mask(mask: np.ndarray):
+    """Convert a binary mask to a QImage (Format_Grayscale8). Inverse of
+    mask_from_qimage(). Builds the QImage from a packed (no row padding)
+    byte buffer, then .copy()s it so it owns its memory independently of
+    the bytes object used to construct it."""
+    from PySide6.QtGui import QImage
+    height, width = mask.shape[:2]
+    data = np.ascontiguousarray(mask, dtype=np.uint8).tobytes()
+    qimage = QImage(data, width, height, width, QImage.Format.Format_Grayscale8)
+    return qimage.copy()

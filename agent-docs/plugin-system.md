@@ -32,8 +32,20 @@ Called from tabs:
 
 - `modules/detection/yolo_detection.py` — Ultralytics YOLO
 - `modules/detection/comfyui_detection.py` — ComfyUI workflow
+- `modules/detection/sam3_detection.py` — SAM3 open-vocabulary text-prompt detection (see ml-models.md)
 - `modules/modifications/lama_inpaint.py` — big-lama torch.jit inpainting
 - `modules/modifications/comfyui_modification.py` — ComfyUI workflow
+
+## Non-Plugin Shared Code Under `modules/`
+
+`modules/sam3/` sits beside `modules/detection/` and `modules/modifications/`
+but is **not** scanned by `discover_modules()` (only those two exact paths
+are ever passed in) — it's a shared library (the vendored SAM3 model +
+`Sam3Engine`) imported directly by `sam3_detection.py` and by the Label/Modify
+tabs' Magic Wand tool, not a plugin itself. `modules/modifications/lama_arch.py`
+(the FFCResNetGenerator used by `lama_inpaint.py`) is the same pattern at
+smaller scale — a plain non-ABC file sitting inside a scanned directory,
+skipped by discovery because it defines no `BaseModificationModule` subclass.
 
 ## Adding a New Plugin
 

@@ -13,8 +13,58 @@ QGraphicsView-based canvas. Image loaded as QGraphicsPixmapItem. Labels rendered
 | BBox | R | `Tool.BBOX` |
 | Polygon | V | `Tool.POLYGON` |
 | Brush (draw mask) | B | `Tool.MARKER` |
+| Magic Wand (SAM3 point segmentation) | G | `Tool.MAGIC_WAND` |
 
 There is no separate Eraser tool. Erasing is handled by the `DrawMode.ERASE` mode while using the Brush tool.
+
+## Magic Wand
+
+Click-to-segment via SAM3's point predictor (see ml-models.md). The canvas
+itself does no inference — `mousePressEvent` just emits
+`magic_wand_requested(x, y)` (image-pixel coords, same `scene_pos` space as
+every other tool) and the owning tab (`LabelTab`/`ModifyTab`) runs a
+`Sam3PointWorker` (`ltd/workers/sam3_point_worker.py`) on a background
+thread, then calls `canvas.apply_mask_result(mask, draw_mode, source='Magic
+Wand')` with the result.
+
+**Must segment the canvas's own pixmap, not the source file.** Tabs often
+display a downscaled preview for large images (`load_pixmap_preview`,
+default cap 1920px — see data-formats-storage.md/architecture.md), so
+`(x, y)` from a click is in *preview* coordinate space. Re-reading the
+full-resolution file from disk for SAM3 would segment the wrong region
+entirely (coordinates off by the preview/full-res scale factor) and,
+separately, return a mask shaped like the full file rather than
+`_mask_buffer` — silently producing no visible change. `get_image_rgb()`
+converts the canvas's *currently displayed* `QPixmap` to an RGB numpy array
+instead, so it's always exactly `image_width x image_height` and always in
+the same coordinate space as the click. `Sam3PointWorker` takes this array
+directly (not a path).
+
+`apply_mask_result(mask, mode=None, source='Magic Wand')` combines an
+external mask into `_mask_buffer` — `cv2.bitwise_or` for New/Combine,
+`bitwise_and(current, bitwise_not(mask))` for Erase, using
+`ltd/utils/mask_utils.py`'s `mask_from_qimage()`/`qimage_from_mask()` pair —
+then calls `_update_mask_overlay_fast()` and emits `mask_updated(mode,
+source)`. `source` exists so a listener can label the action correctly
+(Modify tab's history log would otherwise always say "Brush", since it's
+the same signal a finished brush stroke emits). If the incoming mask's
+shape doesn't match `_mask_buffer` (should not normally happen now that
+callers use `get_image_rgb()`), it's resized via `cv2.resize` rather than
+silently dropped.
+
+Because it emits the same `mask_updated` signal a finished brush stroke
+does, it needs no other tab-side handling of its own: Label tab's existing
+`_on_mask_updated()` converts the result into polygon Label(s) (same
+New/Combine/Erase logic as a brush stroke, `source` ignored there — Qt
+lets a slot declare fewer params than the signal emits), and Modify tab's
+existing `_on_mask_updated(draw_mode, source='Brush')` saves it as the
+inpainting mask and records history under `source`.
+
+`qimage_from_mask()` builds the QImage from a packed (no Qt row-padding)
+byte buffer via the `QImage(data, width, height, bytesPerLine, format)`
+constructor, then `.copy()`s it — `QImage(data, ...)` wraps the given buffer
+without copying by default, so skipping `.copy()` would leave the QImage
+referencing memory owned by a temporary Python `bytes` object.
 
 Spacebar temporarily switches to Hand while held, restoring previous tool on release (`_space_held`, `_tool_before_space`).
 
@@ -118,7 +168,7 @@ The canvas supports two additional overlay modes activated programmatically (not
 - `label_created(Label)` — new bbox/polygon drawn
 - `label_selected(int)` — label clicked with Pointer
 - `label_modified(int, Label)` — label moved/resized via Pointer drag
-- `mask_updated(DrawMode)` — mask buffer changed (emits DrawMode: NEW, COMBINE, or ERASE)
+- `mask_updated(DrawMode, str)` — mask buffer changed (DrawMode: NEW, COMBINE, or ERASE; source label e.g. 'Brush', 'Magic Wand')
 - `drawing_started()` — emitted before first stroke of a brush draw action
 - `brush_size_changed(int)` — for external spinbox sync
 - `split_pos_changed(float)` — emitted when user drags the split overlay divider

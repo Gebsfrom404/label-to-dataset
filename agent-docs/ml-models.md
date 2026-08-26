@@ -21,6 +21,33 @@ Model file: `models/lama/big-lama.pt` (user downloads separately).
 
 Mask dilation controlled by `mask_grow` setting (default 5px).
 
+## SAM3 (Magic Wand + text-prompt detection)
+
+Meta's SAM3 (Segment Anything Model 3), vendored as plain PyTorch — not via
+the official gated `facebook/sam3` HF repo, but through the public,
+ungated mirror `apozz/sam3-safetensors` (same one the ComfyUI-SAM3
+reference downloads from), single checkpoint file `sam3.safetensors`.
+
+**Two entry points, one shared model:**
+- **Magic Wand** — a canvas tool (`Tool.MAGIC_WAND` in `ltd/widgets/canvas_widget.py`, used by both Label and Modify tabs) that segments the object under a single click via SAM3's SAM2-style point predictor.
+- **`modules/detection/sam3_detection.py`** (`Sam3DetectionModule`) — a `BaseDetectionModule` in the Label tab's Auto-Detection dropdown. Text area = one open-vocabulary phrase per non-empty line, each queried **independently** against the image (own class name, own detections) — not sent as one combined string. Confidence slider gates `Sam3Processor.confidence_threshold` (default 0.20).
+
+Both go through `modules/sam3/engine.py`'s `Sam3Engine` (`segment_point()` / `segment_text()`), accessed via the process-wide singleton `get_shared_engine()` so the checkpoint is loaded (and its VRAM held) only once regardless of which feature is used first. `Sam3Engine._prepare_image()` calls `Sam3Processor.set_image()` fresh on every call (no cross-call feature caching — simplicity over a minor perf win, see `modules/sam3/engine.py` docstring).
+
+**Model path**: single shared QSettings key `sam3/model_path`, same "Browse... / Auto-download" UX as `LamaInpaintModule` — configured from the SAM3 detection module's settings panel (Magic Wand has no settings panel of its own, so it just reads the same key via the shared engine). Unset → `download_ckpt_from_hf()` pulls the public mirror on first use.
+
+**Vendored code** (`modules/sam3/vendor/`): `model.py`, `attention.py`, `text_encoder.py`, `tokenizer.py`, `perflib.py`, `utils.py`, `bpe_simple_vocab_16e6.txt.gz`, and `__init__.py` are copied close to verbatim from `references/comfyui-sam3/nodes/sam3/` — this is ~13k lines of model math, hand-transcribing it would be far riskier than copying it. The **only** hand edit: `vendor/__init__.py` had its video/tracking builders (`build_sam3_video_model`, `build_sam3_video_predictor`) and the `predictor.py` import removed (video/tracking is unused here, and `predictor.py` pulls in `psutil`, which isn't otherwise a dependency).
+
+**No ComfyUI carried over.** The vendored files' only ComfyUI touchpoints are a handful of thin torch wrappers (`comfy.ops.manual_cast.{Linear,Conv2d,ConvTranspose2d,LayerNorm,Embedding,GroupNorm}`, `comfy.ops.cast_to_input`, `comfy.model_management.get_torch_device`, `comfy.utils.load_torch_file`/`ProgressBar`, `comfy.ldm.modules.attention.optimized_attention_for_device`/`attention_pytorch`) — no node classes, no ModelPatcher, no `comfy-env` installer. `modules/sam3/comfy_shim.py` implements these as plain PyTorch and registers them into `sys.modules` (must run — via `comfy_shim.install()` — before any `modules.sam3.vendor.*` import; `engine.py` does this at module load time), so the vendored files' `import comfy.ops` etc. resolve transparently without ComfyUI installed. If a vendored file starts raising `AttributeError` on a `comfy.*` symbol after a future re-vendor, the missing symbol needs adding to the shim — grep the vendor dir for `comfy\.` to find what's actually used before guessing.
+
+**New pip deps**: `ftfy`, `regex` (SAM3's CLIP-style BPE tokenizer needs the `regex` package, not stdlib `re`, plus `ftfy` for text cleanup). Everything else (`torch`, `torchvision`, `numpy`, `huggingface_hub`, `safetensors`) was already a dependency.
+
+**Point-prompt coordinates**: pixel space (not normalized), matching the canvas's own `scene_pos` coordinates — no conversion needed between `CanvasWidget.magic_wand_requested(x, y)` and `Sam3Engine.segment_point(image_rgb, x, y)`. Label convention is SAM2-standard: `1` = foreground. `multimask_output=True` returns 3 candidate masks; `segment_point()` picks the one with the highest IoU prediction, then keeps only the mask's largest connected component (`engine.py:_largest_component()`) — point prompts occasionally scatter a few stray-pixel islands around the main object, which a single click shouldn't produce. `segment_text()` does **not** apply this — a text-prompt detection's mask can legitimately be multi-part (e.g. an object split by an occluder), and its detections are already one-object-per-entry.
+
+Verified against the real checkpoint (not just a mocked engine): point-click and multi-phrase text-prompt detection both produce correct, well-separated masks/boxes on a real photo. `model.py`'s optional mask-postprocessing step warns and skips itself if `scikit-image` isn't installed (`No module named 'skimage'`) — harmless per the upstream code's own comment ("OK to ignore... doesn't affect results in most cases"), confirmed in testing; add `scikit-image` as a dependency only if a specific case turns up where it matters.
+
+**Gotcha — `state['masks']` has a channel dim.** `Sam3Processor._forward_grounding()` (vendor/utils.py) builds `state['masks']` via `interpolate(out_masks.unsqueeze(1), ...)`, so its shape is `[N, 1, H, W]`, not `[N, H, W]`. `Sam3Engine.segment_text()` must `.squeeze(1)` before iterating per-detection masks — without it, each mask is `[1, H, W]` (3D), which `cv2.findContours` (via `mask_to_polygons()`) rejects with `cv::copyMakeBorder` `_src.dims() <= 2` assertion failures (findContours pads its input internally). See gotchas-decisions.md.
+
 ## WD Tagger (Caption Tab)
 
 Auto-captioning using timm-based tagger models. Implemented in caption_tab.py.
