@@ -4,17 +4,23 @@ Phases (each reports through ``status`` / ``progress``):
 
 1. **Scan** — recurse every source folder, de-duplicating paths so nested
    sources are not compared with themselves.
-2. **Signatures** — one pHash and/or ORB signature per image.
-3. **Compare** — pairwise. When a source is flagged *original*, only
+2. **Signatures** — one pHash and/or ORB signature per image, taken from the
+   ``SearchCache`` when the file is unchanged since the last search.
+3. **Compare** — pairwise, recording the raw distance / keypoint score rather
+   than a match verdict. When a source is flagged *original*, only
    original-vs-other pairs are tested; otherwise every pair is.
-4. **Group** — union-find (symmetric mode) or best-original assignment.
+4. **Group** — threshold the measured pairs and assemble display groups.
+
+Phases 2 and 3 are skipped entirely when the cache already holds a comparison
+for this algorithm and file set at an equal or looser tolerance — changing
+only the tolerance re-thresholds the existing measurements instead of reading
+any image again.
 
 Unreadable images and images with too few keypoints are dropped after the
 signature phase and reported through ``skipped``.
 """
 from __future__ import annotations
 
-import os
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -23,15 +29,15 @@ from PySide6.QtCore import Signal
 
 from ltd.data.image_list_model import IMAGE_EXTENSIONS
 from ltd.utils.duplicate_utils import (ALGO_HYBRID, ALGO_ORB, ALGO_PHASH,
-                                       MASK_SUFFIX, DuplicateGroup,
-                                       DuplicateMember,
-                                       ImageSignature, compute_orb,
+                                       MASK_SUFFIX, ImageSignature,
+                                       PairScore, SearchCache,
+                                       build_groups, compute_orb,
                                        compute_phash, create_orb_detector,
-                                       create_orb_matcher, group_pairs,
-                                       hamming_distances,
+                                       create_orb_matcher, file_stamp,
+                                       fingerprint_entries, hamming_distances,
                                        hybrid_shortlist_distance,
                                        orb_min_score, orb_similarity,
-                                       phash_max_distance, phash_score)
+                                       phash_max_distance, signature_key)
 from ltd.workers.base_worker import BaseWorker
 
 
@@ -41,16 +47,24 @@ class DuplicateWorker(BaseWorker):
     groups_found = Signal(list)  # list[DuplicateGroup]
     scanned = Signal(int)        # images considered
     skipped = Signal(int)        # images without a usable signature
+    reused = Signal(str)         # what this run was able to skip ('' = nothing)
 
     _PROGRESS_EVERY = 25
 
     def __init__(self, sources: list[tuple[Path, bool]], algorithm: str,
-                 tolerance: int, parent=None):
-        """``sources`` is a list of ``(folder, is_original)``."""
+                 tolerance: int, cache: SearchCache | None = None,
+                 parent=None):
+        """``sources`` is a list of ``(folder, is_original)``.
+
+        ``cache`` is owned by the caller and outlives the worker — that is
+        what makes a second search cheap.
+        """
         super().__init__(parent)
         self.sources = sources
         self.algorithm = algorithm
         self.tolerance = tolerance
+        self.cache = cache if cache is not None else SearchCache()
+        self._reuse_note = ''
 
     # ------------------------------------------------------------------
     # Entry point
@@ -64,34 +78,39 @@ class DuplicateWorker(BaseWorker):
             return
         self.scanned.emit(len(entries))
 
-        signatures = self._compute_signatures(
-            entries,
-            want_phash=self.algorithm in (ALGO_PHASH, ALGO_HYBRID),
-            want_orb=self.algorithm == ALGO_ORB)
+        fingerprint = fingerprint_entries(entries)
+        if self.cache.pairs_usable(self.algorithm, fingerprint,
+                                   self.tolerance):
+            signatures = self._cached_signatures(entries)
+            if signatures is not None:
+                self._finish(signatures, self.cache.pairs, len(entries),
+                             'tolerance only — reused the cached comparison')
+                return
+
+        signatures = self._compute_signatures(entries)
         if self.is_cancelled:
             self.groups_found.emit([])
             return
-        self.skipped.emit(len(entries) - len(signatures))
         if len(signatures) < 2:
+            self.skipped.emit(len(entries) - len(signatures))
             self.groups_found.emit([])
             return
 
-        if self.algorithm == ALGO_PHASH:
-            pairs = self._match_phash(
-                signatures, phash_max_distance(self.tolerance))
-        elif self.algorithm == ALGO_ORB:
-            pairs = self._match_orb(signatures, orb_min_score(self.tolerance))
-        else:
-            shortlist = self._match_phash(
-                signatures, hybrid_shortlist_distance(self.tolerance))
-            pairs = self._verify_shortlist(
-                signatures, shortlist, orb_min_score(self.tolerance))
-
+        pairs = self._compare(signatures)
         if self.is_cancelled:
             self.groups_found.emit([])
             return
+        self.cache.store_pairs(pairs, self.algorithm, fingerprint,
+                               self.tolerance)
+        self._finish(signatures, pairs, len(entries), self._reuse_note)
+
+    def _finish(self, signatures: list[ImageSignature], pairs: list[PairScore],
+                total: int, note: str):
+        self.skipped.emit(total - len(signatures))
+        self.reused.emit(note)
         self.status.emit('Grouping matches...')
-        self.groups_found.emit(self._build_groups(signatures, pairs))
+        self.groups_found.emit(
+            build_groups(signatures, pairs, self.algorithm, self.tolerance))
 
     # ------------------------------------------------------------------
     # 1. Scan
@@ -112,7 +131,7 @@ class DuplicateWorker(BaseWorker):
                         or file.suffix.lower() not in IMAGE_EXTENSIONS
                         or file.name.lower().endswith(MASK_SUFFIX)):
                     continue
-                key = os.path.normcase(os.path.abspath(str(file)))
+                key = signature_key(file)
                 index = seen.get(key)
                 if index is None:
                     seen[key] = len(entries)
@@ -126,51 +145,102 @@ class DuplicateWorker(BaseWorker):
     # 2. Signatures
     # ------------------------------------------------------------------
 
-    def _compute_signatures(self, entries: list[tuple[Path, bool]],
-                            want_phash: bool,
-                            want_orb: bool) -> list[ImageSignature]:
+    def _wants(self) -> tuple[bool, bool]:
+        """(pHash, ORB) — hybrid extracts ORB lazily, for shortlisted files."""
+        return (self.algorithm in (ALGO_PHASH, ALGO_HYBRID),
+                self.algorithm == ALGO_ORB)
+
+    def _cached_signatures(self, entries: list[tuple[Path, bool]]
+                           ) -> list[ImageSignature] | None:
+        """Signatures for a fingerprint-matched run, without touching images.
+
+        Grouping only needs the path, dimensions and original flag, all of
+        which survive an ORB eviction. Returns None if anything is missing,
+        so the caller falls back to a full run.
+        """
+        want_phash, want_orb = self._wants()
+        signatures = []
+        for path, is_original in entries:
+            cached = self.cache.get(path, file_stamp(path))
+            if cached is None:
+                continue  # dropped last run (unreadable / too few keypoints)
+            if (want_phash and cached.phash is None) or (
+                    want_orb and cached.orb is None):
+                return None
+            cached.is_original = is_original
+            signatures.append(cached)
+        return signatures if len(signatures) >= 2 else None
+
+    def _compute_signatures(self, entries: list[tuple[Path, bool]]
+                            ) -> list[ImageSignature]:
+        want_phash, want_orb = self._wants()
         total = len(entries)
         detector = create_orb_detector() if want_orb else None
         signatures: list[ImageSignature] = []
+        computed = 0
         for index, (path, is_original) in enumerate(entries):
             if self.is_cancelled:
                 break
-            signature = ImageSignature(path=path, is_original=is_original)
-            if want_phash:
+            stamp = file_stamp(path)
+            signature = self.cache.get(path, stamp)
+            if signature is None:
+                signature = ImageSignature(path=path, stamp=stamp)
+            # The original flag comes from the source list, not the file, so
+            # it is re-stamped on every run rather than trusted from cache.
+            signature.is_original = is_original
+
+            fresh = False
+            if want_phash and signature.phash is None:
                 result = compute_phash(path)
+                fresh = True
                 if result is not None:
                     signature.phash, signature.width, signature.height = result
-            if want_orb:
+            if want_orb and signature.orb is None:
                 result = compute_orb(path, detector)
+                fresh = True
                 if result is not None:
                     signature.orb, signature.width, signature.height = result
-            if self._is_usable(signature, want_phash, want_orb):
+            if fresh:
+                computed += 1
+                self.cache.put(signature)
+
+            if not ((want_phash and signature.phash is None)
+                    or (want_orb and signature.orb is None)):
                 signatures.append(signature)
             if index % self._PROGRESS_EVERY == 0:
                 self._report(index + 1, total, 'Reading images')
         self._report(total, total, 'Reading images')
+
+        cached = total - computed
+        self._reuse_note = (f'reused {cached} cached signature(s)'
+                            if cached else '')
         return signatures
 
-    @staticmethod
-    def _is_usable(signature: ImageSignature, want_phash: bool,
-                   want_orb: bool) -> bool:
-        if want_phash and signature.phash is None:
-            return False
-        if want_orb and signature.orb is None:
-            return False
-        return True
+    # ------------------------------------------------------------------
+    # 3. Compare
+    # ------------------------------------------------------------------
 
-    # ------------------------------------------------------------------
-    # 3a. Perceptual hash comparison (vectorised per row)
-    # ------------------------------------------------------------------
+    def _compare(self, signatures: list[ImageSignature]) -> list[PairScore]:
+        if self.algorithm == ALGO_PHASH:
+            return self._match_phash(signatures,
+                                     phash_max_distance(self.tolerance))
+        if self.algorithm == ALGO_ORB:
+            return self._match_orb(signatures, orb_min_score(self.tolerance))
+        shortlist = self._match_phash(
+            signatures, hybrid_shortlist_distance(self.tolerance))
+        return self._verify_shortlist(signatures, shortlist,
+                                      orb_min_score(self.tolerance))
+
+    # -- 3a. Perceptual hash comparison (vectorised per row) --
 
     def _match_phash(self, signatures: list[ImageSignature],
-                     max_distance: int) -> list[tuple[int, int, float]]:
+                     max_distance: int) -> list[PairScore]:
         # The signature phase drops anything without a hash, so the filter
         # here keeps every row — it just states that invariant.
         hashes = np.stack([s.phash for s in signatures if s.phash is not None])
+        keys = [signature_key(s.path) for s in signatures]
         originals, others = self._split(signatures)
-        pairs: list[tuple[int, int, float]] = []
+        pairs: list[PairScore] = []
 
         if originals:
             targets = np.array(others, dtype=int)
@@ -182,9 +252,9 @@ class DuplicateWorker(BaseWorker):
                     break
                 distances = hamming_distances(hashes[index], target_hashes)
                 for hit in np.nonzero(distances <= max_distance)[0]:
-                    distance = int(distances[hit])
-                    pairs.append((index, int(targets[hit]),
-                                  phash_score(distance)))
+                    pairs.append(PairScore(
+                        keys[index], keys[int(targets[hit])],
+                        hash_distance=int(distances[hit])))
                 self._report(step + 1, len(originals), 'Comparing hashes')
             return pairs
 
@@ -194,63 +264,71 @@ class DuplicateWorker(BaseWorker):
                 break
             distances = hamming_distances(hashes[index], hashes[index + 1:])
             for hit in np.nonzero(distances <= max_distance)[0]:
-                distance = int(distances[hit])
-                pairs.append((index, index + 1 + int(hit),
-                              phash_score(distance)))
+                pairs.append(PairScore(
+                    keys[index], keys[index + 1 + int(hit)],
+                    hash_distance=int(distances[hit])))
             if index % self._PROGRESS_EVERY == 0:
                 self._report(index + 1, count, 'Comparing hashes')
         self._report(count, count, 'Comparing hashes')
         return pairs
 
-    # ------------------------------------------------------------------
-    # 3b. Descriptor comparison (every pair is real work)
-    # ------------------------------------------------------------------
+    # -- 3b. Descriptor comparison (every pair is real work) --
 
     def _match_orb(self, signatures: list[ImageSignature],
-                   min_score: float) -> list[tuple[int, int, float]]:
+                   min_score: float) -> list[PairScore]:
         matcher = create_orb_matcher()
         total = self._pair_count(signatures)
-        pairs: list[tuple[int, int, float]] = []
+        pairs: list[PairScore] = []
         for done, (a, b) in enumerate(self._iter_pairs(signatures), start=1):
             if self.is_cancelled:
                 break
             score = orb_similarity(signatures[a].orb, signatures[b].orb,
                                    matcher)
             if score >= min_score:
-                pairs.append((a, b, score))
+                pairs.append(PairScore(signature_key(signatures[a].path),
+                                       signature_key(signatures[b].path),
+                                       orb_score=score))
             if done % self._PROGRESS_EVERY == 0:
                 self._report(done, total, 'Matching features')
         self._report(total, total, 'Matching features')
         return pairs
 
     def _verify_shortlist(self, signatures: list[ImageSignature],
-                          shortlist: list[tuple[int, int, float]],
-                          min_score: float) -> list[tuple[int, int, float]]:
+                          shortlist: list[PairScore],
+                          min_score: float) -> list[PairScore]:
         """Re-score pHash candidates with descriptors, dropping the rest."""
         if not shortlist or self.is_cancelled:
             return []
-        involved = sorted({index for a, b, _ in shortlist for index in (a, b)})
+        by_key = {signature_key(s.path): s for s in signatures}
+        involved = sorted({key for pair in shortlist
+                           for key in (pair.a, pair.b)})
         detector = create_orb_detector()
-        for done, index in enumerate(involved, start=1):
+        for done, key in enumerate(involved, start=1):
             if self.is_cancelled:
                 return []
-            signature = signatures[index]
+            signature = by_key.get(key)
+            if signature is None or signature.orb is not None:
+                continue  # already extracted, this run or a previous one
             result = compute_orb(signature.path, detector)
             if result is not None:
                 signature.orb, signature.width, signature.height = result
+                self.cache.put(signature)
             if done % self._PROGRESS_EVERY == 0:
                 self._report(done, len(involved), 'Extracting features')
         self._report(len(involved), len(involved), 'Extracting features')
 
         matcher = create_orb_matcher()
-        pairs: list[tuple[int, int, float]] = []
-        for done, (a, b, _) in enumerate(shortlist, start=1):
+        pairs: list[PairScore] = []
+        for done, pair in enumerate(shortlist, start=1):
             if self.is_cancelled:
                 break
-            score = orb_similarity(signatures[a].orb, signatures[b].orb,
-                                   matcher)
+            a, b = by_key.get(pair.a), by_key.get(pair.b)
+            score = orb_similarity(a.orb if a else None,
+                                   b.orb if b else None, matcher)
             if score >= min_score:
-                pairs.append((a, b, score))
+                pairs.append(PairScore(pair.a, pair.b,
+                                       hash_distance=pair.hash_distance,
+                                       orb_score=score))
             if done % self._PROGRESS_EVERY == 0:
                 self._report(done, len(shortlist), 'Verifying candidates')
         self._report(len(shortlist), len(shortlist), 'Verifying candidates')
@@ -285,67 +363,6 @@ class DuplicateWorker(BaseWorker):
             return len(originals) * len(others)
         count = len(signatures)
         return count * (count - 1) // 2
-
-    # ------------------------------------------------------------------
-    # 4. Grouping
-    # ------------------------------------------------------------------
-
-    def _build_groups(self, signatures: list[ImageSignature],
-                      pairs: list[tuple[int, int, float]]
-                      ) -> list[DuplicateGroup]:
-        if any(s.is_original for s in signatures):
-            return self._build_original_groups(signatures, pairs)
-        return self._build_symmetric_groups(signatures, pairs)
-
-    def _build_original_groups(self, signatures: list[ImageSignature],
-                               pairs: list[tuple[int, int, float]]
-                               ) -> list[DuplicateGroup]:
-        # An image can match several originals — keep only its best match.
-        best: dict[int, tuple[int, float]] = {}
-        for a, b, score in pairs:
-            original, other = (a, b) if signatures[a].is_original else (b, a)
-            current = best.get(other)
-            if current is None or score > current[1]:
-                best[other] = (original, score)
-
-        by_original: dict[int, list[tuple[int, float]]] = {}
-        for other, (original, score) in best.items():
-            by_original.setdefault(original, []).append((other, score))
-
-        groups = []
-        for original in sorted(by_original,
-                               key=lambda i: str(signatures[i].path).lower()):
-            members = [self._member(signatures[original], 1.0)]
-            duplicates = sorted(
-                by_original[original],
-                key=lambda item: (-item[1], str(signatures[item[0]].path).lower()))
-            members.extend(self._member(signatures[index], score)
-                           for index, score in duplicates)
-            groups.append(DuplicateGroup(members))
-        return groups
-
-    def _build_symmetric_groups(self, signatures: list[ImageSignature],
-                                pairs: list[tuple[int, int, float]]
-                                ) -> list[DuplicateGroup]:
-        best_score: dict[int, float] = {}
-        for a, b, score in pairs:
-            best_score[a] = max(best_score.get(a, 0.0), score)
-            best_score[b] = max(best_score.get(b, 0.0), score)
-
-        groups = []
-        for indices in group_pairs(len(signatures), pairs):
-            ordered = sorted(indices,
-                             key=lambda i: str(signatures[i].path).lower())
-            groups.append(DuplicateGroup(
-                [self._member(signatures[i], best_score.get(i, 0.0))
-                 for i in ordered]))
-        return groups
-
-    @staticmethod
-    def _member(signature: ImageSignature, score: float) -> DuplicateMember:
-        return DuplicateMember(path=signature.path, score=score,
-                               is_original=signature.is_original,
-                               width=signature.width, height=signature.height)
 
     # ------------------------------------------------------------------
 

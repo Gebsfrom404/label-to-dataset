@@ -115,8 +115,7 @@ class DuplicateListModel(ImageListModel):
         row = self.rows[index.row()]
 
         if role == Qt.ItemDataRole.DisplayRole:
-            suffix = 'original' if row.is_original else f'{row.score:.0%}'
-            return f'{image.display_name}   [{suffix}]'
+            return f'{image.display_name}   [{self._score_text(row)}]'
         if role == Qt.ItemDataRole.ForegroundRole:
             if row.marked:
                 return QBrush(MARKED_COLOR)
@@ -135,6 +134,20 @@ class DuplicateListModel(ImageListModel):
             return self._tooltip(image, row)
         return super().data(index, role)
 
+    @staticmethod
+    def _score_text(row: DuplicateRow) -> str:
+        """Near-identical scores need a decimal to stay distinguishable.
+
+        With a 256-bit hash every meaningful match lands in the last few
+        percent, so rounding to whole percent would print "100%" for a pair
+        that is merely very close.
+        """
+        if row.is_original:
+            return 'original'
+        if row.score >= 0.99:
+            return f'{row.score:.1%}'
+        return f'{row.score:.0%}'
+
     def _tooltip(self, image: ImageItem, row: DuplicateRow) -> str:
         size_mb = row.size_bytes / (1024 * 1024)
         lines = [str(image.path),
@@ -143,7 +156,7 @@ class DuplicateListModel(ImageListModel):
         if row.is_original:
             lines.append('Original (never deleted)')
         else:
-            lines.append(f'Similarity: {row.score:.1%}')
+            lines.append(f'Similarity: {row.score:.2%}')
         if row.marked:
             lines.append('Marked for deletion')
         return '\n'.join(lines)

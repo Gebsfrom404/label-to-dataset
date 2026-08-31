@@ -133,7 +133,7 @@ image is compared against it and originals are never deleted.</li>
 </ul>
 <b>Algorithms</b>
 <ul style="margin: 0 0 0 -16px;">
-<li><b>Perceptual hash</b> &mdash; one 64-bit DCT hash per image, compared by
+<li><b>Perceptual hash</b> &mdash; one 256-bit DCT hash per image, compared by
 bit distance. Fast on thousands of images. Finds rescaled, re-encoded and
 lightly edited copies; <i>misses crops and rotations</i>.</li>
 <li><b>Local feature descriptors</b> &mdash; ORB keypoints matched with a ratio
@@ -147,10 +147,25 @@ blind spot for rotations.</li>
 </ul>
 <b>Tolerance</b>
 <ul style="margin: 0 0 0 -16px;">
-<li><code>0</code> &mdash; near-identical copies only.</li>
-<li><code>100</code> &mdash; loose; expect unrelated images to be grouped.</li>
+<li><code>0</code> &mdash; identical hashes only. Lossless re-saves and format
+changes match; a heavy re-encode or a large downscale usually needs
+<code>5</code>&ndash;<code>10</code>.</li>
+<li><code>25</code> (default) &mdash; catches re-encodes, resizes and format
+changes, while keeping variants of one artwork (an added caption, an edited
+detail) apart.</li>
+<li><code>100</code> &mdash; loose; near-duplicates and edited variants group
+together, and unrelated images start creeping in.</li>
 <li>The line under the slider shows what the current value means for the
 selected algorithm.</li>
+</ul>
+<b>Re-running a search</b>
+<ul style="margin: 0 0 0 -16px;">
+<li>Searching again at the <b>same or a tighter tolerance</b> is instant: the
+measurements from the last search are re-filtered, and no image is read.</li>
+<li>A <b>looser</b> tolerance re-compares, but still reuses the hashes and
+descriptors already computed.</li>
+<li>Images are only read again when the <b>algorithm changes</b> to one whose
+signatures are not cached yet, or when a file was added, edited or removed.</li>
 </ul>"""
 
 

@@ -178,3 +178,25 @@ Fixed by `CanvasWidget.get_image_rgb()`, which converts the canvas's *currently 
 ## LabelTab: `prepare()` Must Run Before `get_class_names()`
 
 Detection modules whose `get_class_names()` depends on GUI-thread state populated by `prepare()` (SAM3's phrases from its text area; potentially others in future) return stale or empty results if `_get_class_map()` runs before `module.prepare()`. `_run_auto_detection`/`_run_auto_detection_unlabeled` now call `prepare()` first, then build the class map. `_run_auto_detection_current` didn't call `prepare()` at all — SAM3's `self._phrases` stayed whatever a *previous* `prepare()` call had left it as (empty on first-ever use, since `Sam3DetectionModule.run()` returns `[]` when phrases are empty — no crash, just silently does nothing). Fixed by adding the same `module.prepare()` call there too, before `run()`.
+
+## Duplicate search reported "100%" for visibly different images
+
+**Symptom:** two artworks differing by an added speech bubble (and an open
+mouth) were grouped as duplicates at **tolerance 0**, listed at `[100%]`.
+
+**Cause:** the pHash was 8×8 = 64 bits, the common default. That keeps only
+the 64 lowest-frequency DCT coefficients of a 32×32 thumbnail, and a change
+covering ~15% of the frame flips none of them — the two files hashed
+*identically*, so distance 0 and score `1 - 0/64` = 100%. Not a threshold
+problem: no tolerance setting could have separated them. On the reporting
+folder, **all five** pairs at distance 0 were different images.
+
+**Fix:** `HASH_SIZE = 16` (256 bits). The variant pair moves to 20 bits while
+the worst genuine-duplicate transform tested (q20 JPEG, eighth-size, blur,
+small watermark) stays at 4 — a 5× margin. `_PHASH_MAX_BITS` was re-measured
+to 64/256 rather than scaled from the old 25/64, which had been accepting
+5293 of 78606 pairs at tolerance 100.
+
+**Lesson:** pick hash width from measured separation on real data, not from
+what the reference implementations default to. A hash too coarse to represent
+the difference cannot be rescued by tuning the threshold.

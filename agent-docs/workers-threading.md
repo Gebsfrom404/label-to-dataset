@@ -42,7 +42,7 @@ Originally gated behind a `BATCH_SIZE = 100` counter (cleanup only every 100th i
 | ModificationWorker | `modification_worker.py` | Batch image modification via plugin |
 | CaptionWorker | `caption_worker.py` | Batch captioning, emits `caption_complete(index, tags)` |
 | TrainingWorker | `training_worker.py` | YOLO training via ultralytics |
-| DuplicateWorker | `duplicate_worker.py` | Duplicate search: scan → signatures → pairwise compare → group. Emits `groups_found(list)`, `scanned(int)`, `skipped(int)` |
+| DuplicateWorker | `duplicate_worker.py` | Duplicate search: scan → signatures → pairwise compare → group. Emits `groups_found(list)`, `scanned(int)`, `skipped(int)`, `reused(str)`. Takes a caller-owned `SearchCache` so a re-run only redoes what changed |
 | _ScriptWorker | `extras_tab.py` (inline) | Runs extras script `run()` in thread with progress callback |
 
 ## Module Unload

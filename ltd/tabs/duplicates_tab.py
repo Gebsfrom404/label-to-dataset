@@ -28,7 +28,8 @@ from PySide6.QtWidgets import (QAbstractItemView, QFileDialog,
 from ltd.settings import get_settings
 from ltd.utils.duplicate_utils import (ALGORITHM_BY_LABEL, ALGORITHM_LABELS,
                                        ALGO_ORB, ALGO_PHASH, MASK_SUFFIX,
-                                       DuplicateGroup, threshold_description)
+                                       DuplicateGroup, SearchCache,
+                                       threshold_description)
 from ltd.utils.image_utils import load_pixmap_preview
 from ltd.widgets.duplicate_image_list import DuplicateImageList, DuplicateListModel
 from ltd.widgets.elided_label import ElidedLabel
@@ -197,9 +198,13 @@ class DuplicatesTab(QWidget):
         self.settings = get_settings()
         self.model = DuplicateListModel()
         self._worker: DuplicateWorker | None = None
+        # Outlives each worker: signatures and measured pairs are reused so a
+        # re-run only redoes what actually changed (see duplicate-detection.md).
+        self._cache = SearchCache()
         self._current_row = -1
         self._scanned = 0
         self._skipped = 0
+        self._reuse_note = ''
         self._pixmap_cache: OrderedDict[str, QPixmap | None] = OrderedDict()
         self._fullres_loader: FullResLoader | None = None
 
@@ -413,11 +418,13 @@ class DuplicatesTab(QWidget):
 
         self._reset_results()
         self._worker = DuplicateWorker(sources, self._algorithm(),
-                                       self.tolerance_slider.value(), self)
+                                       self.tolerance_slider.value(),
+                                       self._cache, self)
         self._worker.progress.connect(self._on_progress)
         self._worker.status.connect(self.status_label.setText)
         self._worker.scanned.connect(self._on_scanned)
         self._worker.skipped.connect(self._on_skipped)
+        self._worker.reused.connect(self._on_reused)
         self._worker.groups_found.connect(self._on_groups_found)
         self._worker.error.connect(self._on_error)
         self._worker.finished_work.connect(self._on_search_finished)
@@ -429,10 +436,17 @@ class DuplicatesTab(QWidget):
         self._worker.start()
 
     def _confirm_slow_search(self, sources: list[tuple[Path, bool]]) -> bool:
-        """Descriptor matching is quadratic — warn before a long run."""
+        """Descriptor matching is quadratic — warn before a long run.
+
+        Skipped once the cache already covers this algorithm at an equal or
+        looser tolerance: that run only re-thresholds existing measurements.
+        """
         if self._algorithm() != ALGO_ORB:
             return True
         if any(is_original for _, is_original in sources):
+            return True
+        if self._cache.pairs_algorithm == ALGO_ORB \
+                and self.tolerance_slider.value() <= self._cache.pairs_tolerance:
             return True
         reply = QMessageBox.question(
             self, 'Slow Search',
@@ -462,6 +476,7 @@ class DuplicatesTab(QWidget):
             self._fullres_loader.quit()
             self._fullres_loader.wait()
             self._fullres_loader = None
+        self._cache.clear()
 
     def _on_progress(self, current: int, total: int):
         self.progress.setMaximum(total)
@@ -472,6 +487,9 @@ class DuplicatesTab(QWidget):
 
     def _on_skipped(self, count: int):
         self._skipped = count
+
+    def _on_reused(self, note: str):
+        self._reuse_note = note
 
     def _on_groups_found(self, groups: list[DuplicateGroup]):
         self.model.load_groups(groups, self._source_label)
@@ -488,6 +506,8 @@ class DuplicatesTab(QWidget):
                  f'{self._scanned} image(s) scanned']
         if self._skipped:
             parts.append(f'{self._skipped} unreadable / too few features')
+        if self._reuse_note:
+            parts.append(self._reuse_note)
         self.summary_label.setText('  •  '.join(parts))
 
     def _on_error(self, message: str):
@@ -505,6 +525,7 @@ class DuplicatesTab(QWidget):
     def _reset_results(self):
         self._scanned = 0
         self._skipped = 0
+        self._reuse_note = ''
         self._current_row = -1
         self._pixmap_cache.clear()
         self.model.clear()
