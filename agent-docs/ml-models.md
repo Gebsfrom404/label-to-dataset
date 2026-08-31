@@ -21,6 +21,13 @@ Model file: `models/lama/big-lama.pt` (user downloads separately).
 
 Mask dilation controlled by `mask_grow` setting (default 5px).
 
+`edge_step` setting (default 0px, `lama_inpaint/edge_step`) zeroes the mask
+within N px of the image border. Applied *after* the 1536px downscale, so the
+margin is measured in the pixels LaMa actually sees. Use it when a mask touches
+the border: the crop is padded with `BORDER_REFLECT_101`, which mirrors the
+opposite side in, and keeping a thin strip of original pixels usually looks
+better. If the step-away empties the mask, inpainting is skipped entirely.
+
 ## SAM3 (Magic Wand + text-prompt detection)
 
 Meta's SAM3 (Segment Anything Model 3), vendored as plain PyTorch — not via

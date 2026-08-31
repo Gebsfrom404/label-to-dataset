@@ -19,6 +19,7 @@ class LamaInpaintModule(BaseModificationModule):
         self._model = None
         self._model_path = ''
         self._mask_grow = 5
+        self._edge_step = 0
         self._settings_widget = None
         self._model_path_label = None
         self._device = None
@@ -61,6 +62,21 @@ class LamaInpaintModule(BaseModificationModule):
         grow_layout.addWidget(self._grow_spin)
         layout.addLayout(grow_layout)
 
+        # Edge step-away
+        edge_layout = QHBoxLayout()
+        edge_layout.addWidget(QLabel('Edge step-away:'))
+        self._edge_spin = QSpinBox()
+        self._edge_spin.setRange(0, 200)
+        self._edge_spin.setValue(self._edge_step)
+        self._edge_spin.setSuffix(' px')
+        self._edge_spin.setToolTip(
+            'Clear the mask within this many pixels of the image border, '
+            'keeping a thin strip of original pixels at the edge instead of '
+            'letting LaMa mirror the opposite side into it.')
+        self._edge_spin.valueChanged.connect(self._on_edge_step_changed)
+        edge_layout.addWidget(self._edge_spin)
+        layout.addLayout(edge_layout)
+
         layout.addStretch()
         self._settings_widget = widget
         return widget
@@ -79,11 +95,16 @@ class LamaInpaintModule(BaseModificationModule):
         self._mask_grow = value
         self._save_settings()
 
+    def _on_edge_step_changed(self, value):
+        self._edge_step = value
+        self._save_settings()
+
     def _save_settings(self):
         from ltd.settings import get_settings
         settings = get_settings()
         settings.setValue('lama_inpaint/model_path', self._model_path)
         settings.setValue('lama_inpaint/mask_grow', self._mask_grow)
+        settings.setValue('lama_inpaint/edge_step', self._edge_step)
 
     def _restore_settings(self):
         from ltd.settings import get_settings
@@ -92,6 +113,7 @@ class LamaInpaintModule(BaseModificationModule):
         if path and Path(path).exists():
             self._model_path = path
         self._mask_grow = settings.value('lama_inpaint/mask_grow', 5, type=int)
+        self._edge_step = settings.value('lama_inpaint/edge_step', 0, type=int)
 
     def _download_model(self) -> Path:
         """Download big-lama.safetensors from HuggingFace if not present."""
@@ -197,12 +219,17 @@ class LamaInpaintModule(BaseModificationModule):
             image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
             mask = cv2.resize(mask, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
 
+        # Step the mask away from the image border. Applied after the
+        # downscale so the margin is measured in pixels LaMa actually sees.
+        self._apply_edge_step(mask)
+
         # Process each disconnected mask region as an independent crop
         result = image.copy()
-        regions = self._find_mask_regions(mask)
-        for (x1, y1, x2, y2) in regions:
-            result = self._inpaint_region(
-                result, mask, x1, y1, x2, y2)
+        if mask.any():  # edge step-away can leave nothing to inpaint
+            regions = self._find_mask_regions(mask)
+            for (x1, y1, x2, y2) in regions:
+                result = self._inpaint_region(
+                    result, mask, x1, y1, x2, y2)
 
         # Upscale back to original resolution if we downscaled
         if short_side > max_side:
@@ -219,6 +246,19 @@ class LamaInpaintModule(BaseModificationModule):
         from ltd.utils.file_utils import cv_imwrite
         cv_imwrite(output_path, result)
         return output_path
+
+    def _apply_edge_step(self, mask: np.ndarray):
+        """Clear mask pixels within `edge_step` px of the image border."""
+        if self._edge_step <= 0:
+            return
+        h, w = mask.shape[:2]
+        step = min(self._edge_step, h // 2, w // 2)
+        if step <= 0:
+            return
+        mask[:step, :] = 0
+        mask[h - step:, :] = 0
+        mask[:, :step] = 0
+        mask[:, w - step:] = 0
 
     def _find_mask_regions(self, mask: np.ndarray, context: int = 128):
         """Find bounding boxes of disconnected mask regions with context."""
