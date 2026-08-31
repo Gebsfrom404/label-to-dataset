@@ -151,6 +151,8 @@ QSettings('LabelToDataset', 'LabelToDataset')
 
 Extras tab uses `extras/{script_stem}/{param_name}` keys for per-script parameter persistence.
 
+Manage Duplicates uses `duplicates/*` keys: `sources` (list of folder paths), `original` (the one folder checked as original, `''` for none), `algorithm`, `tolerance`, `delete_sidecars`. Reading `sources` back must handle QSettings collapsing a one-element string list to a bare string.
+
 ## Undo System (Label Tab)
 
 Per-image undo stacks: `_undo_stacks[image_index] = [snapshot, ...]` (keyed by image index, not path)

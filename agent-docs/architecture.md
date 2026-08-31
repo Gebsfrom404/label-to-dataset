@@ -9,12 +9,14 @@ Warnings suppressed unless `LTD_ENVIRONMENT=development`.
 ## Tabs
 
 ```
-Label → Modify → Caption → Train YOLO → Manage Gen Images → Extras
+Label → Modify → Caption → Train YOLO → Manage Gen Images → Manage Duplicates → Extras
 ```
 
 Each tab is a QWidget in `ltd/tabs/`. MainWindow holds them in a QTabWidget and mediates inter-tab communication via signals. Data passes through temp folders (`ltd/utils/file_utils.py`).
 
 `Manage Gen Images` is a standalone viewer (no inter-tab signals): browses AI-generated PNGs and shows their embedded generation metadata. Read-only.
+
+`Manage Duplicates` is likewise standalone: it searches its own source folders and only writes when the user deletes. See [duplicate-detection.md](duplicate-detection.md).
 
 ## Key Components
 
@@ -37,6 +39,9 @@ Each tab is a QWidget in `ltd/tabs/`. MainWindow holds them in a QTabWidget and 
 | Info text | `ltd/widgets/info_text.py` | All filter-grammar and shortcut help strings, one per filter widget / tab section (e.g. `LABEL_FILTER_HELP`, `CAPTION_SHORTCUTS_INPUT`, `GEN_SHORTCUTS_LIST`). Tabs build focus-aware help by concatenating sections that match `focus_in()` |
 | Label image list | `ltd/widgets/label_image_list.py` | Image list with filter proxy (by label count, class, filename) |
 | Caption image list | `ltd/widgets/caption_image_list.py` | Image list with filter, multi-select, context menu (copy/move/delete, Open in Default App, Open in Modify). Menu shortcuts are `WidgetWithChildrenShortcut`-scoped — they need focus in the list |
+| Image canvas | `ltd/widgets/image_canvas.py` | Read-only QGraphicsView (auto-fit, Ctrl+wheel zoom, drag pan) + `FullResLoader` thread. Shared by Manage Gen Images and Manage Duplicates |
+| Duplicate list | `ltd/widgets/duplicate_image_list.py` | `DuplicateListModel` (duplicate groups, red delete marks, blue originals) + list widget; filter grammar adds `marked:`, `original:`, `score:` |
+| Source list | `ltd/tabs/duplicates_tab.py` (inline) | Folders to search, with an exclusive "original" checkbox; persists to `duplicates/sources` |
 | Gen image list | `ltd/widgets/gen_image_list.py` | Image list for Manage Gen Images tab; multi-select; context menu with Copy Prompt (Ctrl+C), Copy Image to..., Move Image to... (Ctrl+M); extends CaptionImageList's filter grammar with `WxH`, `size:`, `w:`, `h:`, `meta:`, `format:` terms |
 | Tag dictionary | `ltd/data/tag_dictionary.py` | CSV tag database loader (danbooru/e621), category colors, autocomplete search |
 | Tag completer popup | `ltd/widgets/tag_completer_popup.py` | Custom autocomplete popup with colored tags and post counts |
@@ -62,6 +67,14 @@ Both right-panel tag lists (`EditableTagsList` = Image Tags, `AllTagsList` = All
 - `copy_tags_requested(list)` → `CaptionTab._copy_tags_to_clipboard()` — comma-joined, matching `CaptionImageList._copy_tags`, so copied tags paste back through its Paste Tags.
 
 `selected_tags()` on each list returns the selection in list order; `AllTagsList` strips the ` (count)` suffix. A right-click outside the selection falls back to the clicked tag alone.
+
+## Manage Duplicates Tab
+
+`ltd/tabs/duplicates_tab.py` — 3 panes: sources + result list (left), preview (center), Search / Actions tabs (right).
+
+Search runs in `DuplicateWorker`; results are duplicate **groups**, not a flat list. Marking a row for deletion is independent of the list selection, and images from a source checked as *original* can never be marked. `Delete Selected` moves files to the recycle bin (optionally with `.txt` caption and `-masklabel.png` mask).
+
+Algorithms, tolerance mapping, and grouping rules: [duplicate-detection.md](duplicate-detection.md).
 
 ## Extras Tab
 

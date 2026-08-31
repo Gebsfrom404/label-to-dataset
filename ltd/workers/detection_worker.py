@@ -52,9 +52,12 @@ class DetectionWorker(BaseWorker):
                 errors.append(msg)
                 self.status.emit(f'Error: {msg}')
 
-            # Batch memory cleanup
-            if (i + 1) % self.BATCH_SIZE == 0:
-                self._cleanup_memory()
+            # Memory cleanup after every image, not just every BATCH_SIZE —
+            # a GPU-heavy module's peak-per-image VRAM (e.g. SAM3, which
+            # scales with image resolution and detection count) otherwise
+            # stays reserved for the rest of the run instead of being
+            # released back after each image.
+            self._cleanup_memory()
 
         self.progress.emit(total, total)
         if errors:

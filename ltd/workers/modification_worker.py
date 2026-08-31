@@ -46,8 +46,8 @@ class ModificationWorker(BaseWorker):
                     errors.append(msg)
                     self.status.emit(f'Error: {msg}')
 
-                if (i + 1) % self.BATCH_SIZE == 0:
-                    self._cleanup_memory()
+                # Cleanup after every image — see detection_worker.py.
+                self._cleanup_memory()
         finally:
             if hasattr(self.module, 'unload'):
                 self.module.unload()
