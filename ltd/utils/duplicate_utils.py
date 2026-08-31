@@ -7,16 +7,18 @@ Two comparison families, plus a hybrid:
   over thousands of images is vectorised and fast. Robust to rescaling,
   re-encoding and mild colour edits; blind to crops and rotations.
 * **Local feature descriptors (ORB)** — up to ``ORB_FEATURES`` keypoints per
-  image, matched with a Lowe ratio test and verified with a RANSAC homography.
-  Finds crops, rotations and framing changes, but every pair needs a real
-  match, so it is O(n^2) in *matching* work, not just in comparisons.
+  image, matched with a Lowe ratio test and aligned with a RANSAC homography.
+  The homography is not the answer, only the alignment: the score comes from
+  warping one image onto the other and measuring how much of the overlapping
+  frame actually disagrees. Finds crops, rotations and framing changes, but
+  every pair needs a real match, so it is O(n^2) in *matching* work.
 * **Hybrid** — pHash builds a loose shortlist, ORB verifies only those pairs.
   Cheap, but inherits pHash's blind spot: rotated copies never reach the
   verification stage.
 
 Scores are normalised to ``0.0..1.0`` for both families so the UI can show one
-number: pHash uses ``1 - distance / HASH_BITS``, ORB uses the share of
-keypoints that survive matching + geometric verification.
+number: pHash uses ``1 - distance / HASH_BITS``, ORB uses one minus the share
+of the aligned frame that disagrees.
 """
 from __future__ import annotations
 
@@ -67,14 +69,34 @@ ORB_MIN_KEYPOINTS = 12
 _LOWE_RATIO = 0.75
 _RANSAC_REPROJ = 5.0
 _MIN_MATCHES_FOR_HOMOGRAPHY = 8
+_MIN_INLIERS = 10
+_MIN_INLIER_SHARE = 0.08
+
+# Agreement grid. The aligned difference is pooled into GRID x GRID cells and
+# a cell counts as disagreeing past _CELL_DIFF mean grey levels. Pooling is
+# the point: a local edit ruins a few cells outright, while re-encoding and
+# resampling raise every cell slightly and must not count. A plain mean
+# difference cannot tell those apart — measured, an 8-degree rotation of an
+# image scored a *higher* mean difference than a genuinely edited copy.
+_GRID = 16
+_CELL_DIFF = 18.0
+# A warp covering less of the frame than this is treated as no evidence: a
+# small patch aligns perfectly against anything it was cut from.
+_MIN_COVERAGE = 0.20
+
+# Descriptor tolerance is a share of the frame allowed to differ, on a square
+# curve: the interesting band is all near zero (measured — every genuine
+# duplicate transform disagreed on 0 cells, an added speech bubble on 3.9%, a
+# different artwork on 57%), so a linear ramp would spend most of the slider
+# in useless territory.
+_ORB_DIFF_FLOOR = 0.005   # one cell of 256, for compression noise
+_ORB_DIFF_MAX = 0.30
 
 # tolerance (0 = strict, 100 = loose) → per-algorithm threshold.
 # 64/256 = 25% of the hash. Unrelated images sit around 50% by construction,
 # so a quarter of the bits is already generous: on the sample folder it
 # accepted 120 of 78606 pairs, where the old 39% ceiling accepted 5293.
 _PHASH_MAX_BITS = 64
-_ORB_STRICT = 0.45
-_ORB_LOOSE = 0.05
 _HYBRID_SHORTLIST_BITS = 96  # 37.5% — deliberately loose, ORB rejects
 
 # Byte → set-bit-count lookup; avoids depending on np.bitwise_count.
@@ -149,10 +171,15 @@ def phash_max_distance(tolerance: int) -> int:
     return round(min(max(tolerance, 0), 100) / 100 * _PHASH_MAX_BITS)
 
 
-def orb_min_score(tolerance: int) -> float:
-    """Smallest accepted keypoint-agreement ratio for a tolerance of 0..100."""
+def orb_max_difference(tolerance: int) -> float:
+    """Share of the aligned frame allowed to disagree, for tolerance 0..100."""
     t = min(max(tolerance, 0), 100) / 100
-    return _ORB_STRICT - t * (_ORB_STRICT - _ORB_LOOSE)
+    return _ORB_DIFF_FLOOR + t * t * (_ORB_DIFF_MAX - _ORB_DIFF_FLOOR)
+
+
+def orb_min_score(tolerance: int) -> float:
+    """Smallest accepted descriptor score for a tolerance of 0..100."""
+    return 1.0 - orb_max_difference(tolerance)
 
 
 def hybrid_shortlist_distance(tolerance: int) -> int:
@@ -164,11 +191,12 @@ def threshold_description(algorithm: str, tolerance: int) -> str:
     if algorithm == ALGO_PHASH:
         return (f'match when at most {phash_max_distance(tolerance)} of '
                 f'{HASH_BITS} hash bits differ')
+    allowed = orb_max_difference(tolerance)
     if algorithm == ALGO_ORB:
-        return (f'match when at least {orb_min_score(tolerance):.0%} of '
-                f'keypoints align')
+        return (f'match when at most {allowed:.1%} of the aligned image '
+                f'differs')
     return (f'shortlist within {hybrid_shortlist_distance(tolerance)} bits, '
-            f'then at least {orb_min_score(tolerance):.0%} of keypoints align')
+            f'then at most {allowed:.1%} of the aligned image differs')
 
 
 # --- perceptual hash --------------------------------------------------------
@@ -228,43 +256,138 @@ def compute_orb(path: Path,
     return OrbSignature(points, descriptors), width, height
 
 
-def create_orb_matcher() -> cv2.BFMatcher:
-    return cv2.BFMatcher(cv2.NORM_HAMMING)
+def load_orb_grey(path: Path) -> np.ndarray | None:
+    """Grayscale image at detection scale — keypoints live in this frame."""
+    image = cv_imread(path, cv2.IMREAD_GRAYSCALE)
+    if image is None or image.size == 0:
+        return None
+    height, width = image.shape[:2]
+    longest = max(height, width)
+    if longest > ORB_MAX_DIM:
+        scale = ORB_MAX_DIM / longest
+        image = cv2.resize(image, (max(1, round(width * scale)),
+                                   max(1, round(height * scale))),
+                           interpolation=cv2.INTER_AREA)
+    return image
 
 
-def orb_similarity(a: OrbSignature | None, b: OrbSignature | None,
-                   matcher: cv2.BFMatcher | None = None) -> float:
-    """Share of keypoints that match *and* fit one homography (0.0..1.0).
+class DescriptorComparer:
+    """Scores a pair of images by how much of the aligned frame disagrees.
 
-    Falls back to the plain ratio-test share when there are too few matches
-    for a homography, or when RANSAC cannot estimate one (near-degenerate
-    keypoint layouts, e.g. flat or heavily repetitive images).
+    Two stages. The first is descriptors only — ratio-test matches and a
+    RANSAC homography — and costs no I/O, so it can run over every pair. Only
+    a pair that actually aligns reaches the second stage, which reads the two
+    images and compares them pixel-wise in one frame; unrelated images almost
+    never get that far.
+
+    Scoring on the aligned pixels rather than on keypoint agreement is what
+    makes the ranking correct. Measured on real files, the old
+    keypoint-share score rated an edited copy (0.83) *above* an 80% centre
+    crop (0.52) and an 8-degree rotation (0.72) of the same picture — no
+    threshold could separate them. Here all three duplicates score 1.00 and
+    the edited copy 0.96.
+
+    One comparer per worker: OpenCV matchers are stateful, and the grey-image
+    cache assumes single-threaded use.
     """
-    if a is None or b is None:
-        return 0.0
-    denominator = min(len(a.descriptors), len(b.descriptors))
-    if denominator == 0:
-        return 0.0
-    matcher = matcher or create_orb_matcher()
-    try:
-        raw = matcher.knnMatch(a.descriptors, b.descriptors, k=2)
-    except cv2.error:
-        return 0.0
 
-    good = [pair[0] for pair in raw
-            if len(pair) == 2 and pair[0].distance < _LOWE_RATIO * pair[1].distance]
-    if len(good) < _MIN_MATCHES_FOR_HOMOGRAPHY:
-        return len(good) / denominator
+    def __init__(self, cache_size: int = 48):
+        self._matcher = cv2.BFMatcher(cv2.NORM_HAMMING)
+        self._grey: OrderedDict[str, np.ndarray] = OrderedDict()
+        self._cache_size = cache_size
 
-    src = a.keypoints[[m.queryIdx for m in good]].reshape(-1, 1, 2)
-    dst = b.keypoints[[m.trainIdx for m in good]].reshape(-1, 1, 2)
-    try:
-        matrix, mask = cv2.findHomography(src, dst, cv2.RANSAC, _RANSAC_REPROJ)
-    except cv2.error:
-        matrix, mask = None, None
-    if matrix is None or mask is None:
-        return len(good) / denominator
-    return int(mask.sum()) / denominator
+    # -- stage 1: descriptors --
+
+    def score(self, a: ImageSignature | None,
+              b: ImageSignature | None) -> float:
+        if a is None or b is None or a.orb is None or b.orb is None:
+            return 0.0
+        matrix = self._align(a.orb, b.orb)
+        if matrix is None:
+            return 0.0
+        return self._pixel_agreement(a.path, b.path, matrix)
+
+    def _align(self, a: OrbSignature, b: OrbSignature) -> np.ndarray | None:
+        """Homography mapping b's frame onto a's, or None if they disagree."""
+        if len(a.descriptors) == 0 or len(b.descriptors) == 0:
+            return None
+        try:
+            raw = self._matcher.knnMatch(b.descriptors, a.descriptors, k=2)
+        except cv2.error:
+            return None
+        good = [pair[0] for pair in raw
+                if len(pair) == 2
+                and pair[0].distance < _LOWE_RATIO * pair[1].distance]
+        if len(good) < _MIN_MATCHES_FOR_HOMOGRAPHY:
+            return None
+        src = b.keypoints[[m.queryIdx for m in good]].reshape(-1, 1, 2)
+        dst = a.keypoints[[m.trainIdx for m in good]].reshape(-1, 1, 2)
+        try:
+            matrix, mask = cv2.findHomography(src, dst, cv2.RANSAC,
+                                              _RANSAC_REPROJ)
+        except cv2.error:
+            return None
+        if matrix is None or mask is None:
+            return None
+        inliers = int(mask.sum())
+        # A handful of inliers can be fitted to almost anything; demand both
+        # an absolute count and a share of the matches before believing it.
+        if (inliers < _MIN_INLIERS
+                or inliers < _MIN_INLIER_SHARE * len(good)):
+            return None
+        return matrix
+
+    # -- stage 2: aligned pixels --
+
+    def _pixel_agreement(self, path_a: Path, path_b: Path,
+                         matrix: np.ndarray) -> float:
+        image_a = self._load(path_a)
+        image_b = self._load(path_b)
+        if image_a is None or image_b is None:
+            return 0.0
+        height, width = image_a.shape[:2]
+        try:
+            warped = cv2.warpPerspective(image_b, matrix, (width, height))
+            covered = cv2.warpPerspective(
+                np.ones_like(image_b, dtype=np.uint8), matrix, (width, height))
+        except cv2.error:
+            return 0.0
+
+        valid = covered > 0
+        if valid.sum() < _MIN_COVERAGE * height * width:
+            return 0.0
+
+        target = image_a.astype(np.float32)
+        candidate = warped.astype(np.float32)
+        # Match exposure over the overlap so a brightness tweak or a re-encode
+        # does not read as a difference.
+        candidate += target[valid].mean() - candidate[valid].mean()
+        difference = np.abs(target - candidate)
+        difference[~valid] = 0.0
+
+        cells = cv2.resize(difference, (_GRID, _GRID),
+                           interpolation=cv2.INTER_AREA)
+        counted = cv2.resize(valid.astype(np.float32), (_GRID, _GRID),
+                             interpolation=cv2.INTER_AREA) > 0.5
+        total = int(counted.sum())
+        if total == 0:
+            return 0.0
+        disagreeing = int(((cells > _CELL_DIFF) & counted).sum())
+        return 1.0 - disagreeing / total
+
+    def _load(self, path: Path) -> np.ndarray | None:
+        key = signature_key(path)
+        cached = self._grey.get(key)
+        if cached is not None:
+            self._grey.move_to_end(key)
+            return cached
+        image = load_orb_grey(path)
+        if image is None:
+            return None
+        self._grey[key] = image
+        while len(self._grey) > self._cache_size:
+            self._grey.popitem(last=False)
+        return image
 
 
 # --- thresholds applied to a computed pair ---------------------------------

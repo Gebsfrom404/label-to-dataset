@@ -29,15 +29,15 @@ from PySide6.QtCore import Signal
 
 from ltd.data.image_list_model import IMAGE_EXTENSIONS
 from ltd.utils.duplicate_utils import (ALGO_HYBRID, ALGO_ORB, ALGO_PHASH,
-                                       MASK_SUFFIX, ImageSignature,
-                                       PairScore, SearchCache,
+                                       MASK_SUFFIX, DescriptorComparer,
+                                       ImageSignature, PairScore, SearchCache,
                                        build_groups, compute_orb,
                                        compute_phash, create_orb_detector,
-                                       create_orb_matcher, file_stamp,
-                                       fingerprint_entries, hamming_distances,
+                                       file_stamp, fingerprint_entries,
+                                       hamming_distances,
                                        hybrid_shortlist_distance,
-                                       orb_min_score, orb_similarity,
-                                       phash_max_distance, signature_key)
+                                       orb_min_score, phash_max_distance,
+                                       signature_key)
 from ltd.workers.base_worker import BaseWorker
 
 
@@ -276,14 +276,13 @@ class DuplicateWorker(BaseWorker):
 
     def _match_orb(self, signatures: list[ImageSignature],
                    min_score: float) -> list[PairScore]:
-        matcher = create_orb_matcher()
+        comparer = DescriptorComparer()
         total = self._pair_count(signatures)
         pairs: list[PairScore] = []
         for done, (a, b) in enumerate(self._iter_pairs(signatures), start=1):
             if self.is_cancelled:
                 break
-            score = orb_similarity(signatures[a].orb, signatures[b].orb,
-                                   matcher)
+            score = comparer.score(signatures[a], signatures[b])
             if score >= min_score:
                 pairs.append(PairScore(signature_key(signatures[a].path),
                                        signature_key(signatures[b].path),
@@ -317,14 +316,12 @@ class DuplicateWorker(BaseWorker):
                 self._report(done, len(involved), 'Extracting features')
         self._report(len(involved), len(involved), 'Extracting features')
 
-        matcher = create_orb_matcher()
+        comparer = DescriptorComparer()
         pairs: list[PairScore] = []
         for done, pair in enumerate(shortlist, start=1):
             if self.is_cancelled:
                 break
-            a, b = by_key.get(pair.a), by_key.get(pair.b)
-            score = orb_similarity(a.orb if a else None,
-                                   b.orb if b else None, matcher)
+            score = comparer.score(by_key.get(pair.a), by_key.get(pair.b))
             if score >= min_score:
                 pairs.append(PairScore(pair.a, pair.b,
                                        hash_distance=pair.hash_distance,

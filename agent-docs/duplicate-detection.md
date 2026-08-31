@@ -18,12 +18,12 @@ and maps back through `ALGORITHM_BY_LABEL`.
 | Key | What it does | Finds | Misses |
 |-----|--------------|-------|--------|
 | `phash` | 256-bit DCT hash of a 64×64 grayscale copy, Hamming distance | rescales, re-encodes, mild colour edits | crops, rotations |
-| `orb` | ≤500 ORB keypoints, Lowe ratio test, RANSAC homography | crops, rotations, reframes | nothing structural, but slow |
-| `hybrid` | pHash shortlist (≤24 bits) verified by ORB | what pHash shortlists, minus false positives | rotations — they never reach the shortlist |
+| `orb` | ≤500 ORB keypoints → RANSAC homography → **aligned pixel comparison** | crops, rotations, reframes; separates a copy from an edited variant | nothing structural, but slow |
+| `hybrid` | pHash shortlist (≤96 bits) verified by ORB | what pHash shortlists, minus false positives | crops and rotations — they never reach the shortlist |
 
 Both families emit a **0.0–1.0 score** so one number works in the UI: pHash
-uses `1 - distance / HASH_BITS`, ORB the share of keypoints that survive
-matching *and* geometric verification. The list prints a decimal above 99%,
+uses `1 - distance / HASH_BITS`, ORB one minus the share of the aligned frame
+that disagrees. The list prints a decimal above 99%,
 because at 256 bits every real match lands in the last few percent and whole
 percentages would render a merely-close pair as "100%".
 
@@ -60,6 +60,41 @@ it to `originals × others`.
 ORB images are downscaled to `ORB_MAX_DIM = 640` on the longest side before
 detection, and `ImageSignature.width/height` still records the *original*
 resolution (the list and "select all but biggest" depend on that).
+
+### Why the descriptor score is not keypoint agreement
+
+The obvious ORB score — the share of keypoints that match and survive RANSAC
+— ranks duplicates *below* edited copies, so no threshold can separate them.
+Measured on real files against one original:
+
+| pair | keypoint share | aligned disagreement |
+|---|---|---|
+| edited copy (speech bubble added) — **different** | **0.83** | 3.9% |
+| other artwork from the same post — different | 0.15 | 57.5% |
+| half-size q70 copy — duplicate | 0.95 | 0.0% |
+| 80% centre crop — duplicate | **0.52** | 0.0% |
+| rotated 8° — duplicate | **0.72** | 0.0% |
+
+A crop drops 20% of the frame, so a fifth of the keypoints have no partner
+and a perfect duplicate scores 0.52; a local edit leaves 83% of keypoints
+untouched and scores 0.83. Ordering is inverted.
+
+The fix is to treat the homography as *alignment*, not as the answer: warp
+one image onto the other and measure how much of the overlap actually
+disagrees. All three duplicates then score 1.00 and the edited copy 0.96.
+
+Pooling into a `_GRID`×`_GRID` grid matters as much as the alignment. A plain
+mean difference does not work — an 8° rotation scored a *higher* mean
+difference (3.04) than the genuinely edited copy (2.38), because resampling
+raises every pixel slightly while an edit ruins a small region completely.
+Counting whole cells past `_CELL_DIFF` ignores the diffuse kind and catches
+the concentrated kind. Exposure is equalised over the overlap first, so a
+brightness tweak is not a difference.
+
+**Cost:** the alignment stage is descriptors only and touches no files, so it
+can run over every pair (~0.6 ms). Only a pair that actually aligns reaches
+the pixel stage — measured at 2.0% of pairs on a real folder — which is why
+reading images there is affordable.
 
 ## Caching — what a re-run actually redoes
 
@@ -162,9 +197,13 @@ as a duplicate of the image it belongs to.
 - The scan phase always runs — it is what produces the fingerprint, and it is
   how a file added since the last search gets noticed. Only the phases after
   it are cacheable.
-- `orb_similarity()` falls back to the plain ratio-test share when RANSAC
-  cannot fit a homography (flat or heavily repetitive images), rather than
-  scoring them 0.
+- `DescriptorComparer` scores 0 when it cannot align a pair at all — no
+  homography, too few RANSAC inliers, or under `_MIN_COVERAGE` overlap. A
+  small patch aligns perfectly against anything it was cut from, so thin
+  evidence must not read as a perfect match.
+- The comparer holds a bounded LRU of grey images at detection scale.
+  Keypoints are stored in that downscaled frame, so the warp must use the
+  same scale — `load_orb_grey()` is the single place that rule lives.
 - Changing `HASH_SIZE` invalidates nothing on disk (the cache is in-memory
   only), but it does change what every tolerance means — re-measure the
   ceiling against a real folder rather than scaling the old constant.

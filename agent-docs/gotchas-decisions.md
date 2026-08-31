@@ -200,3 +200,26 @@ to 64/256 rather than scaled from the old 25/64, which had been accepting
 **Lesson:** pick hash width from measured separation on real data, not from
 what the reference implementations default to. A hash too coarse to represent
 the difference cannot be rescued by tuning the threshold.
+
+## Descriptor mode grouped the same edited pair the hash did
+
+**Symptom:** after the pHash width fix, "perceptual hash, then descriptor
+verify" still grouped two images differing by an added speech bubble.
+
+**Cause:** a second, independent bug in the same feature. The descriptor
+score was the share of keypoints that matched and survived RANSAC, which
+*inverts* the ranking: the edited pair scored 0.83 while an 80% centre crop
+of one image scored 0.52 and an 8° rotation 0.72 — both genuine duplicates.
+A crop removes a fifth of the frame and with it a fifth of the keypoints,
+while a local edit leaves most keypoints untouched. No threshold separates a
+0.83 non-duplicate from a 0.52 duplicate.
+
+**Fix:** `DescriptorComparer` now uses the homography only to *align*, then
+warps one image onto the other and scores by the share of a 16×16 cell grid
+that disagrees. Duplicates (crop, rotation, rescale, q20, brightness) all
+score ≥0.996; the edited pair scores 0.961 and needs tolerance 34+.
+
+**Lesson:** when a similarity score has to rank several kinds of difference
+against each other, check the *ordering* on real examples before tuning the
+threshold. Both bugs in this feature presented as "wrong threshold" and
+neither was.

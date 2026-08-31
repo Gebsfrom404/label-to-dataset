@@ -136,14 +136,17 @@ image is compared against it and originals are never deleted.</li>
 <li><b>Perceptual hash</b> &mdash; one 256-bit DCT hash per image, compared by
 bit distance. Fast on thousands of images. Finds rescaled, re-encoded and
 lightly edited copies; <i>misses crops and rotations</i>.</li>
-<li><b>Local feature descriptors</b> &mdash; ORB keypoints matched with a ratio
-test and verified with a RANSAC homography. Finds cropped, rotated and
-reframed copies. Every pair is real work, so runtime grows with the square of
-the image count.</li>
+<li><b>Local feature descriptors</b> &mdash; ORB keypoints are matched to
+align the two images, then the overlapping frame is compared directly and the
+score is the share of it that agrees. Finds cropped, rotated and reframed
+copies, and tells a real copy apart from one with a caption or logo added.
+Every pair is real work, so runtime grows with the square of the image
+count.</li>
 <li><b>Hash, then descriptor verify</b> &mdash; the hash builds a loose
-shortlist that descriptors confirm. Much faster than a full descriptor pass
-and fewer false positives than the hash alone, but it inherits the hash's
-blind spot for rotations.</li>
+shortlist that descriptors confirm. Far fewer false positives than the hash
+alone and much faster than a full descriptor pass, but it can only confirm
+what the hash shortlisted &mdash; <i>crops and rotations never reach the
+descriptor stage</i>. Use plain descriptors to find those.</li>
 </ul>
 <b>Tolerance</b>
 <ul style="margin: 0 0 0 -16px;">
@@ -156,7 +159,8 @@ detail) apart.</li>
 <li><code>100</code> &mdash; loose; near-duplicates and edited variants group
 together, and unrelated images start creeping in.</li>
 <li>The line under the slider shows what the current value means for the
-selected algorithm.</li>
+selected algorithm: hash bits allowed to differ, or the share of the aligned
+image allowed to disagree.</li>
 </ul>
 <b>Re-running a search</b>
 <ul style="margin: 0 0 0 -16px;">
