@@ -70,7 +70,7 @@ Both right-panel tag lists (`EditableTagsList` = Image Tags, `AllTagsList` = All
 
 ## Manage Duplicates Tab
 
-`ltd/tabs/duplicates_tab.py` — 3 panes: sources + result list (left), preview (center), Search / Actions tabs (right).
+`ltd/tabs/duplicates_tab.py` — 3 panes: sources + result list (left), preview (center), Search + Actions panel (right).
 
 Search runs in `DuplicateWorker`; results are duplicate **groups**, not a flat list. Marking a row for deletion is independent of the list selection, and images from a source checked as *original* can never be marked. `Delete Selected` moves files to the recycle bin (optionally with `.txt` caption and `-masklabel.png` mask).
 

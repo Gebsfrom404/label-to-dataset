@@ -5,7 +5,7 @@ copies you do not want to keep:
 
   Left   — Sources (check one as *original*) over the duplicate list.
   Center — Read-only preview of the highlighted image.
-  Right  — Tabs: Search (algorithm + tolerance) and Actions (mark / delete).
+  Right  — Search (algorithm + tolerance) over Actions (mark / delete).
 
 Marking is separate from the list selection: marked rows are drawn in red and
 only ``Delete Selected`` touches the disk (files go to the recycle bin).
@@ -22,8 +22,8 @@ from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtWidgets import (QAbstractItemView, QFileDialog,
                                QGroupBox, QHBoxLayout, QLabel, QListWidget,
                                QListWidgetItem, QMessageBox, QProgressBar,
-                               QPushButton, QSplitter, QTabWidget,
-                               QVBoxLayout, QWidget)
+                               QPushButton, QSplitter, QVBoxLayout,
+                               QWidget)
 
 from ltd.settings import get_settings
 from ltd.utils.duplicate_utils import (ALGORITHM_BY_LABEL, ALGORITHM_LABELS,
@@ -75,11 +75,6 @@ class SourceListWidget(QWidget):
         self.list_widget.itemChanged.connect(self._on_item_changed)
         self.list_widget.itemDoubleClicked.connect(self._open_folder)
         layout.addWidget(self.list_widget, stretch=1)
-
-        hint = QLabel('Check a folder to use it as the original')
-        hint.setWordWrap(True)
-        hint.setEnabled(False)
-        layout.addWidget(hint)
 
         buttons = QHBoxLayout()
         self.add_button = QPushButton('Add Folder...')
@@ -233,7 +228,7 @@ class DuplicatesTab(QWidget):
     def _build_left_panel(self) -> QWidget:
         left = QSplitter(Qt.Orientation.Vertical)
 
-        sources_group = QGroupBox('Sources')
+        sources_group = QGroupBox('Sources (check originals folder)')
         sources_layout = QVBoxLayout(sources_group)
         self.source_list = SourceListWidget()
         sources_layout.addWidget(self.source_list)
@@ -273,14 +268,18 @@ class DuplicatesTab(QWidget):
         return center
 
     def _build_right_panel(self) -> QWidget:
-        self.right_tabs = QTabWidget()
-        self.right_tabs.addTab(self._build_search_tab(), 'Search')
-        self.right_tabs.addTab(self._build_actions_tab(), 'Actions')
-        return self.right_tabs
+        """Search and actions in one column — too few controls to split."""
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self._build_search_group())
+        layout.addWidget(self._build_actions_group())
+        layout.addStretch()
+        return panel
 
-    def _build_search_tab(self) -> QWidget:
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
+    def _build_search_group(self) -> QWidget:
+        group = QGroupBox('Search')
+        layout = QVBoxLayout(group)
 
         header = QHBoxLayout()
         header.addWidget(QLabel('Algorithm'), stretch=1)
@@ -325,13 +324,11 @@ class DuplicatesTab(QWidget):
         self.summary_label = QLabel('')
         self.summary_label.setWordWrap(True)
         layout.addWidget(self.summary_label)
+        return group
 
-        layout.addStretch()
-        return tab
-
-    def _build_actions_tab(self) -> QWidget:
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
+    def _build_actions_group(self) -> QWidget:
+        group = QGroupBox('Actions')
+        layout = QVBoxLayout(group)
 
         header = QHBoxLayout()
         self.marked_label = QLabel('0 marked for deletion')
@@ -361,9 +358,7 @@ class DuplicatesTab(QWidget):
         note.setWordWrap(True)
         note.setEnabled(False)
         layout.addWidget(note)
-
-        layout.addStretch()
-        return tab
+        return group
 
     def _connect_signals(self):
         self.search_button.clicked.connect(self._start_search)
