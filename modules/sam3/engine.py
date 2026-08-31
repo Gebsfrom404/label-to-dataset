@@ -136,11 +136,21 @@ def get_shared_engine() -> Sam3Engine:
 
     Magic Wand and the SAM3 detection module both call this so the checkpoint
     is loaded (and its VRAM held) only once, regardless of which feature is
-    used first.
+    used first. Guarded by the same lock `Sam3Engine._ensure_model()` uses
+    for the actual model build: Magic Wand runs on its own worker thread
+    (`Sam3PointWorker`) independently of the Label tab's detection buttons,
+    so two clicks close together (Magic Wand + Auto-Label, or two batch
+    runs) can genuinely call this from different threads at once. Without
+    the lock, both could see `_shared_engine is None` and each construct
+    (and separately load) their own `Sam3Engine` — two full checkpoints
+    sitting in VRAM/RAM at once.
     """
     global _shared_engine
-    if _shared_engine is None:
-        from ltd.settings import get_settings
-        model_path = get_settings().value('sam3/model_path', '', type=str)
-        _shared_engine = Sam3Engine(model_path or None)
-    return _shared_engine
+    if _shared_engine is not None:
+        return _shared_engine
+    with _lock:
+        if _shared_engine is None:
+            from ltd.settings import get_settings
+            model_path = get_settings().value('sam3/model_path', '', type=str)
+            _shared_engine = Sam3Engine(model_path or None)
+        return _shared_engine

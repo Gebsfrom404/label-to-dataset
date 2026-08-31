@@ -37,8 +37,8 @@ class GenerationWorker(BaseWorker):
                 errors.append(msg)
                 self.status.emit(f'Error: {msg}')
 
-            if (i + 1) % self.BATCH_SIZE == 0:
-                self._cleanup_memory()
+            # Cleanup after every image — see detection_worker.py.
+            self._cleanup_memory()
 
         self.progress.emit(total, total)
 

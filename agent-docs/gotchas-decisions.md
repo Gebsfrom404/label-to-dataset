@@ -63,7 +63,7 @@ Plugin modules have Qt widget settings panels. These widgets cannot be accessed 
 
 ## Spacebar Pan
 
-Canvas needs `StrongFocus` policy and `keyPressEvent`/`keyReleaseEvent` handlers. The label tab must call `canvas.setFocus()` after image switching so spacebar works immediately.
+Canvas needs `StrongFocus` policy and `keyPressEvent`/`keyReleaseEvent` handlers. The label tab must call `canvas.setFocus()` after image switching so spacebar works immediately — but `_on_image_changed()` skips this when `image_list.list_view.hasFocus()` (in addition to the existing `filter_input.hasFocus()` check). Without that guard, arrow-key navigation in the image list (native QListView Up/Down) would switch the image, `_on_image_changed()` would steal focus to the canvas, and a second Down press would land on the canvas (which doesn't handle it) instead of continuing to navigate the list — "press Down once, list goes dead."
 
 ## No Separate Eraser Tool
 
@@ -163,6 +163,14 @@ Both tabs display large images via `load_pixmap_preview(path, max_dim=1920)` —
 
 Fixed by `CanvasWidget.get_image_rgb()`, which converts the canvas's *currently displayed* `QPixmap` to a numpy array instead of re-reading the file — guaranteed to be exactly `image_width x image_height`, the same space the click coordinates are in. `Sam3PointWorker` now takes this array directly rather than a path. `apply_mask_result()` also gained a `cv2.resize` fallback for the (should-no-longer-happen) mismatched-shape case, so a future regression here fails loudly (wrong-looking mask) rather than silently.
 
+## Batch Workers: Memory Cleanup Gated Behind `BATCH_SIZE` Let VRAM Ratchet Up
+
+`DetectionWorker`/`ModificationWorker`/`CaptionWorker`/`GenerationWorker` only called `_cleanup_memory()` (`gc.collect()` + `torch.cuda.empty_cache()`) every `BaseWorker.BATCH_SIZE` (100) images — fine for light models, but for a folder under 100 images it meant `empty_cache()` never ran until the whole batch finished. SAM3's text-grounding path upsamples every surviving detection's mask to the *original* image resolution (not the fixed 1008×1008 it processes internally at — `Sam3Processor._forward_grounding` in `modules/sam3/vendor/utils.py`), so one image's peak VRAM scales with image resolution × surviving-detection count × number of text-prompt phrases (each phrase is a separate forward pass). `torch.cuda.empty_cache()` only returns *reserved-but-unused* memory to the driver — reserved memory otherwise only grows to match the highest peak seen so far in the run and stays there. Measured: a 10-phrase, low-confidence run peaked at ~8GB allocated for one busy 4000×2670 image; without per-image cleanup, "reserved" (what Task Manager/nvidia-smi show) ratcheted from ~3.6GB idle up past 12GB across just 4 images and stayed there; with `empty_cache()` after each image it dropped back to ~3.7GB every time. Fixed by removing the `BATCH_SIZE` gate entirely — cleanup now runs after every single item in all four workers (`BaseWorker.BATCH_SIZE` removed, unused).
+
+## SAM3 Shared Engine: Singleton Creation Wasn't Thread-Safe
+
+`get_shared_engine()`'s `if _shared_engine is None: _shared_engine = Sam3Engine(...)` was an unguarded check-then-act. Magic Wand runs on its own worker thread (`Sam3PointWorker`) independently of the Label tab's Auto-Label buttons (sync for "Current", a `DetectionWorker` thread for batch) — clicking into two of these features close together could call `get_shared_engine()` from two threads at once, both see `None`, and each construct (and separately load) its own `Sam3Engine` — two full checkpoints in VRAM/RAM simultaneously, one of them orphaned and never freed since only the last-assigned instance is reachable as the "shared" one afterward. `Sam3Engine._ensure_model()`'s own lock only protects *within* one instance; it can't prevent two instances from existing in the first place. Fixed by guarding singleton creation with the same module-level `_lock` `_ensure_model()` uses for the build itself (sequential reuse of one lock across the two call sites — construction is cheap and always finishes, so no deadlock risk). Verified with a 20-thread concurrent-construction stress test.
+
 ## Magic Wand History Mislabeled "Brush"
 
 `ModifyTab._on_mask_updated()` is the shared handler for both a finished brush stroke and (once added) Magic Wand — both go through `CanvasWidget.mask_updated`. It unconditionally logged the history entry as `'Brush'`. Fixed by adding a `source` argument to `mask_updated` (`Signal(object, str)`) and to `apply_mask_result(mask, mode, source='Magic Wand')`; `_on_mask_updated(self, draw_mode, source='Brush')` now records `source`. Label tab's own `_on_mask_updated(self, draw_mode=None)` needed no change — Qt lets a connected slot declare fewer parameters than the signal emits.
@@ -170,3 +178,48 @@ Fixed by `CanvasWidget.get_image_rgb()`, which converts the canvas's *currently 
 ## LabelTab: `prepare()` Must Run Before `get_class_names()`
 
 Detection modules whose `get_class_names()` depends on GUI-thread state populated by `prepare()` (SAM3's phrases from its text area; potentially others in future) return stale or empty results if `_get_class_map()` runs before `module.prepare()`. `_run_auto_detection`/`_run_auto_detection_unlabeled` now call `prepare()` first, then build the class map. `_run_auto_detection_current` didn't call `prepare()` at all — SAM3's `self._phrases` stayed whatever a *previous* `prepare()` call had left it as (empty on first-ever use, since `Sam3DetectionModule.run()` returns `[]` when phrases are empty — no crash, just silently does nothing). Fixed by adding the same `module.prepare()` call there too, before `run()`.
+
+## Duplicate search reported "100%" for visibly different images
+
+**Symptom:** two artworks differing by an added speech bubble (and an open
+mouth) were grouped as duplicates at **tolerance 0**, listed at `[100%]`.
+
+**Cause:** the pHash was 8×8 = 64 bits, the common default. That keeps only
+the 64 lowest-frequency DCT coefficients of a 32×32 thumbnail, and a change
+covering ~15% of the frame flips none of them — the two files hashed
+*identically*, so distance 0 and score `1 - 0/64` = 100%. Not a threshold
+problem: no tolerance setting could have separated them. On the reporting
+folder, **all five** pairs at distance 0 were different images.
+
+**Fix:** `HASH_SIZE = 16` (256 bits). The variant pair moves to 20 bits while
+the worst genuine-duplicate transform tested (q20 JPEG, eighth-size, blur,
+small watermark) stays at 4 — a 5× margin. `_PHASH_MAX_BITS` was re-measured
+to 64/256 rather than scaled from the old 25/64, which had been accepting
+5293 of 78606 pairs at tolerance 100.
+
+**Lesson:** pick hash width from measured separation on real data, not from
+what the reference implementations default to. A hash too coarse to represent
+the difference cannot be rescued by tuning the threshold.
+
+## Descriptor mode grouped the same edited pair the hash did
+
+**Symptom:** after the pHash width fix, "perceptual hash, then descriptor
+verify" still grouped two images differing by an added speech bubble.
+
+**Cause:** a second, independent bug in the same feature. The descriptor
+score was the share of keypoints that matched and survived RANSAC, which
+*inverts* the ranking: the edited pair scored 0.83 while an 80% centre crop
+of one image scored 0.52 and an 8° rotation 0.72 — both genuine duplicates.
+A crop removes a fifth of the frame and with it a fifth of the keypoints,
+while a local edit leaves most keypoints untouched. No threshold separates a
+0.83 non-duplicate from a 0.52 duplicate.
+
+**Fix:** `DescriptorComparer` now uses the homography only to *align*, then
+warps one image onto the other and scores by the share of a 16×16 cell grid
+that disagrees. Duplicates (crop, rotation, rescale, q20, brightness) all
+score ≥0.996; the edited pair scores 0.961 and needs tolerance 34+.
+
+**Lesson:** when a similarity score has to rank several kinds of difference
+against each other, check the *ordering* on real examples before tuning the
+threshold. Both bugs in this feature presented as "wrong threshold" and
+neither was.

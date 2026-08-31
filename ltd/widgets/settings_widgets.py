@@ -1,6 +1,6 @@
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QLineEdit,
-                               QPlainTextEdit, QSpinBox)
+                               QPlainTextEdit, QSlider, QSpinBox)
 
 from ltd.settings import get_settings
 
@@ -47,6 +47,16 @@ class SettingsDoubleSpinBox(QDoubleSpinBox):
         self.setRange(minimum, maximum)
         self.settings = get_settings()
         self.setValue(self.settings.value(key, default, type=float))
+        self.valueChanged.connect(lambda value: self.settings.setValue(key, value))
+
+
+class SettingsSlider(QSlider):
+    def __init__(self, key: str, default: int, minimum: int, maximum: int,
+                 orientation: Qt.Orientation = Qt.Orientation.Horizontal):
+        super().__init__(orientation)
+        self.setRange(minimum, maximum)
+        self.settings = get_settings()
+        self.setValue(self.settings.value(key, default, type=int))
         self.valueChanged.connect(lambda value: self.settings.setValue(key, value))
 
 

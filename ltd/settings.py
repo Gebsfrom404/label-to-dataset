@@ -16,6 +16,7 @@ DEFAULT_SETTINGS = {
     'last_modify_directory': '',
     'last_caption_directory': '',
     'last_dataset_directory': '',
+    'last_duplicates_directory': '',
     'detection_confidence': 0.25,
     'mask_grow': 5,
     'train_split': 80,

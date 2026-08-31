@@ -94,6 +94,106 @@ Space-separated terms are ANDed. Searches filename, prompt, and raw metadata.<br
 </ul>"""
 
 
+DUPLICATES_FILTER_HELP = """\
+<b>Duplicate filter</b><br>
+Space-separated terms are ANDed. Filters the search results only.<br>
+<br>
+<b>Terms</b>
+<ul style="margin: 0 0 0 -16px;">
+<li><i>plain text</i> &mdash; substring on the listed path</li>
+<li><code>marked:yes</code> &nbsp; <code>marked:no</code> &mdash; marked for deletion</li>
+<li><code>original:yes</code> &nbsp; <code>original:no</code> &mdash; from the original source</li>
+<li><code>score:&gt;=95</code> &mdash; similarity in percent (<code>=</code> <code>!=</code> <code>&lt;</code> <code>&gt;</code> <code>&lt;=</code> <code>&gt;=</code>)</li>
+<li><code>name:PATTERN</code> &mdash; filename match</li>
+<li><code>path:PATTERN</code> &mdash; full path match</li>
+<li><code>r:REGEX</code> &mdash; regex on the listed path</li>
+<li><code>"quoted text"</code> &mdash; preserves spaces</li>
+</ul>
+<b>Combinators</b>
+<ul style="margin: 0 0 0 -16px;">
+<li><code>and</code>, <code>or</code>, <code>not</code> / <code>-</code>, <code>(...)</code> grouping</li>
+</ul>
+<b>Examples</b>
+<ul style="margin: 0 0 0 -16px;">
+<li><code>marked:yes</code></li>
+<li><code>original:no score:&gt;=98</code></li>
+<li><code>path:*\\batch_02\\* not marked:yes</code></li>
+</ul>"""
+
+
+DUPLICATES_SEARCH_HELP = """\
+<b>Duplicate search</b><br>
+<br>
+<b>Sources</b>
+<ul style="margin: 0 0 0 -16px;">
+<li>Every source folder is scanned recursively.</li>
+<li>Check <i>original</i> on one source to make it the reference: every other
+image is compared against it and originals are never deleted.</li>
+<li>With no original checked, all images are compared against each other.</li>
+</ul>
+<b>Algorithms</b>
+<ul style="margin: 0 0 0 -16px;">
+<li><b>Perceptual hash</b> &mdash; one 256-bit DCT hash per image, compared by
+bit distance. Fast on thousands of images. Finds rescaled, re-encoded and
+lightly edited copies; <i>misses crops and rotations</i>.</li>
+<li><b>Local feature descriptors</b> &mdash; ORB keypoints are matched to
+align the two images, then the overlapping frame is compared directly and the
+score is the share of it that agrees. Finds cropped, rotated and reframed
+copies, and tells a real copy apart from one with a caption or logo added.
+Every pair is real work, so runtime grows with the square of the image
+count.</li>
+<li><b>Hash, then descriptor verify</b> &mdash; the hash builds a loose
+shortlist that descriptors confirm. Far fewer false positives than the hash
+alone and much faster than a full descriptor pass, but it can only confirm
+what the hash shortlisted &mdash; <i>crops and rotations never reach the
+descriptor stage</i>. Use plain descriptors to find those.</li>
+</ul>
+<b>Tolerance</b>
+<ul style="margin: 0 0 0 -16px;">
+<li><code>0</code> &mdash; identical hashes only. Lossless re-saves and format
+changes match; a heavy re-encode or a large downscale usually needs
+<code>5</code>&ndash;<code>10</code>.</li>
+<li><code>25</code> (default) &mdash; catches re-encodes, resizes and format
+changes, while keeping variants of one artwork (an added caption, an edited
+detail) apart.</li>
+<li><code>100</code> &mdash; loose; near-duplicates and edited variants group
+together, and unrelated images start creeping in.</li>
+<li>The line under the slider shows what the current value means for the
+selected algorithm: hash bits allowed to differ, or the share of the aligned
+image allowed to disagree.</li>
+</ul>
+<b>Re-running a search</b>
+<ul style="margin: 0 0 0 -16px;">
+<li>Searching again at the <b>same or a tighter tolerance</b> is instant: the
+measurements from the last search are re-filtered, and no image is read.</li>
+<li>A <b>looser</b> tolerance re-compares, but still reuses the hashes and
+descriptors already computed.</li>
+<li>Images are only read again when the <b>algorithm changes</b> to one whose
+signatures are not cached yet, or when a file was added, edited or removed.</li>
+</ul>"""
+
+
+DUPLICATES_ACTIONS_HELP = """\
+<b>Marking and deleting</b><br>
+<br>
+Marking is separate from the list selection: marked rows are drawn in
+<span style="color:#e05a4e;">red</span> and survive navigation. Images from an
+<span style="color:#4aa3df;">original</span> source are never marked.<br>
+<br>
+<b>Buttons</b>
+<ul style="margin: 0 0 0 -16px;">
+<li><b>Select All</b> &mdash; marks every duplicate found.</li>
+<li><b>Select All But Biggest</b> &mdash; per group, keeps the largest by pixel
+count (file size breaks ties) and marks the rest.</li>
+<li><b>Select All But Newest</b> &mdash; per group, keeps the most recently
+modified file and marks the rest.</li>
+<li><b>Delete Selected</b> &mdash; moves every marked file to the recycle bin,
+optionally with its <code>.txt</code> caption and
+<code>-masklabel.png</code> mask.</li>
+</ul>
+Groups left with a single image after a deletion drop off the list."""
+
+
 # ---------------------------------------------------------------------------
 # Tab shortcut help. Sections may have a "scope" key — the section is shown
 # only when the focused widget is inside (or equals) that scope. Sections
@@ -215,4 +315,24 @@ GEN_SHORTCUTS_CANVAS = _section('Canvas', [
     ('Ctrl+0', 'Fit to view'),
     ('Drag (when zoomed)', 'Pan'),
     ('PgUp / PgDown', 'Previous / next image'),
+])
+
+
+DUPLICATES_SHORTCUTS_LIST = _section('Duplicate list', [
+    ('Up / Down / W / S / PgUp / PgDown', 'Navigate'),
+    ('Space', 'Mark / unmark selection for deletion'),
+    ('Ctrl+A', 'Select all visible rows'),
+    ('Ctrl+O', 'Open in default app'),
+    ('Right-click', 'Mark, open, show in explorer'),
+])
+DUPLICATES_SHORTCUTS_SOURCES = _section('Sources', [
+    ('Checkbox', 'Mark the source as original (only one at a time)'),
+    ('Double-click', 'Open the folder in explorer'),
+    ('Del', 'Remove the selected source'),
+])
+DUPLICATES_SHORTCUTS_CANVAS = _section('Preview', [
+    ('Ctrl+Wheel', 'Zoom'),
+    ('Ctrl+0', 'Fit to view'),
+    ('Drag (when zoomed)', 'Pan'),
+    ('PgUp / PgDown', 'Previous / next duplicate'),
 ])
