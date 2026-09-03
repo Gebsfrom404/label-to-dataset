@@ -42,10 +42,16 @@ class _ScriptWorker(QThread):
     def is_cancelled(self) -> bool:
         return self._is_cancelled
 
-    def _progress_callback(self, current: int, total: int, message: str = ''):
+    def _progress_callback(self, current: int, total: int, message: str = '') -> bool:
+        """Report progress and return whether the script should stop.
+
+        Long-running scripts poll the return value to bail out early; scripts
+        that don't care simply ignore it.
+        """
         self.progress.emit(current, total)
         if message:
             self.status.emit(message)
+        return self._is_cancelled
 
     def run(self):
         try:

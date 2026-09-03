@@ -84,6 +84,10 @@ Scripts must export: `SCRIPT_INFO` dict (name, parameters), `check_available()` 
 
 Parameter types: `str`, `bool`, `folder`, `combo`. Settings persisted via QSettings under `extras/{script_stem}/{param_name}`.
 
+`run(params, progress_callback)` — **`progress_callback(current, total, message)` returns `True` when the user has cancelled.** Long-running scripts should poll it and bail out; scripts that don't care ignore the return value. The only UI for a cancelled run is the error line, so raise with a message saying how far it got (`dataset_clustering.py` does this).
+
+Scripts are self-contained by convention — they import stdlib and third-party packages, not `ltd.*`.
+
 ## Directory Layout
 
 ```
