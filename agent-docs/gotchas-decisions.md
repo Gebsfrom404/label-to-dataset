@@ -250,3 +250,20 @@ older run heals itself.
 running script, so `run()` could never be interrupted — a problem once a script
 does minutes of GPU work. `_progress_callback` now **returns `self._is_cancelled`**,
 which scripts poll. Backward compatible: existing scripts ignore the return value.
+
+## `set_input_text` Hard-Coded the `text` Input Key
+
+"Generate from caption (yiffymix)" stopped producing the caption after its
+`LTD_Input_Text` node was swapped from a custom `Text Multiline` node to
+ComfyUI's native `PrimitiveStringMultiline`. The native primitive exposes its
+string as `value`, not `text`, so `set_input_text` wrote the caption into an
+input the node ignores and the graph rendered from an empty prompt (the
+concatenated quality tags only).
+
+Fix: `set_input_text` now resolves the key through `_prompt_key()` /
+`_PROMPT_KEYS`, the same detection `set_input_prompt` already used. Any node
+carrying its string in `text`, `prompt`, `string` or `value` works.
+
+Watch for the same class of bug whenever a workflow is re-saved against a newer
+ComfyUI that replaced a custom node with a native equivalent — the LTD title
+still matches, so validation passes and the failure is silent.
