@@ -29,8 +29,21 @@ transitively via `ultralytics`).
 
 | Strategy | Behavior |
 |----------|----------|
-| `Cluster by folder` | Every kept image moves into `{output}/{repeats}_{name}/`. Outliers **and** over-cap trim go to the leftovers folder. Input subfolder structure is flattened. |
+| `Cluster by folder` | Every kept image moves into a cluster folder under `{output}` (layout per **Output Structure**, below). Outliers **and** over-cap trim go to the leftovers folder. Input subfolder structure is flattened. |
 | `Drop outliers` | Only outliers move to leftovers. Everything else stays in place with its original subfolder structure. **The cap is not applied** — this is deliberate, not an oversight. |
+
+## Output Structure
+
+Only affects `Cluster by folder`. Clustering, trimming, repeat counts and
+membership are identical either way — the option is purely the folder layout.
+
+| Option | Result |
+|--------|--------|
+| `{repeats}_{subject}` | `output/1_green_eyes_pink_hair/` — flat, the kohya convention, directly trainable. **Default**, and what the script did before the option existed. |
+| `{repeats}/{subject}` | `output/1/green_eyes_pink_hair/` — every cluster sharing a repeat count grouped under one parent. |
+
+The name-collision guard keys on the **whole relative path**, so under the
+nested layout two clusters only collide when their repeat count matches too.
 
 ## Balancing: trim the big, repeat the small
 
@@ -38,7 +51,7 @@ Both directions are used, so the *effective* image count per cluster converges:
 
 - Big clusters are trimmed down to the cap.
 - `repeats = clamp(round(median / kept_size), 1, max_repeats)` boosts small
-  clusters, following the kohya `{repeats}_{name}` folder convention, so the
+  clusters, following the kohya repeats-in-the-folder-name convention, so the
   output folder is drop-in trainable.
 
 Measured on the 504-image `references/dataset_clustering` set at the defaults:

@@ -29,12 +29,18 @@ logger = logging.getLogger(__name__)
 STRATEGY_CLUSTER = 'Cluster by folder'
 STRATEGY_OUTLIERS = 'Drop outliers'
 
+# Kohya reads repeats off the folder name, so the flat form is directly
+# trainable. The nested form groups every cluster sharing a repeat count under
+# one parent, which trainers that take a dataset root per repeat count prefer.
+STRUCTURE_FLAT = '{repeats}_{subject}'
+STRUCTURE_NESTED = '{repeats}/{subject}'
+
 SCRIPT_INFO = {
     'name': 'Cluster Dataset by Similarity',
     'type': 'dataset',
     'description': (
         'Embed every image with convnextv2_huge.dbv4-full, cluster by cosine '
-        'similarity, then either split into balanced {repeats}_{name} folders '
+        'similarity, then either split into balanced repeat-prefixed folders '
         'or move outliers to a leftovers folder. Matching .txt captions and '
         '-masklabel.png masks travel with their image.'
     ),
@@ -47,6 +53,8 @@ SCRIPT_INFO = {
          'placeholder': 'Outliers and over-cap images land here'},
         {'name': 'strategy', 'type': 'combo', 'label': 'Strategy',
          'options': [STRATEGY_CLUSTER, STRATEGY_OUTLIERS], 'default': STRATEGY_CLUSTER},
+        {'name': 'output_structure', 'type': 'combo', 'label': 'Output Structure',
+         'options': [STRUCTURE_FLAT, STRUCTURE_NESTED], 'default': STRUCTURE_FLAT},
         {'name': 'tolerance', 'type': 'str', 'label': 'Cluster Tolerance (cosine distance)',
          'default': '0.60', 'placeholder': '0.60 - usable range ~0.45-0.80, higher merges more'},
         {'name': 'min_cluster_size', 'type': 'str', 'label': 'Min Cluster Size (below = outlier)',
@@ -416,7 +424,7 @@ def _move_with_sidecars(path: Path, dest_dir: Path) -> None:
 
 @dataclass
 class _Plan:
-    """Shared state for turning clusters into {repeats}_{name} folder moves."""
+    """Shared state for turning clusters into repeat-prefixed folder moves."""
 
     images: list[Path]
     embeds: np.ndarray
@@ -426,6 +434,7 @@ class _Plan:
     median: float
     cap: int
     max_repeats: int
+    structure: str
     leftovers: Path
 
     def build(self, out_root: Path,
@@ -444,13 +453,17 @@ class _Plan:
             # Trim the big clusters down to the cap, repeat the small ones up.
             repeats = min(self.max_repeats,
                           max(1, int(round(self.median / len(keep)))))
-            name = _cluster_name(members, self.tags, self.global_freq,
-                                 len(self.images),
-                                 self.images[_medoid(self.embeds, members)].stem)
+            subject = _cluster_name(members, self.tags, self.global_freq,
+                                    len(self.images),
+                                    self.images[_medoid(self.embeds, members)].stem)
+
+            folder = (f'{repeats}_{subject}' if self.structure == STRUCTURE_FLAT
+                      else f'{repeats}/{subject}')
 
             # Two clusters can score the same top tags. Without this they would
             # share a folder, silently merging groups the clustering separated.
-            folder = f'{repeats}_{name}'
+            # Nested output only collides when the repeat count matches too,
+            # which is why the whole relative path is the key.
             if folder in used_names:
                 n = 2
                 while f'{folder}_{n}' in used_names:
@@ -464,7 +477,7 @@ class _Plan:
                          for i in members if i not in kept_set)
 
             report.append(f'{order:>4}  {len(members):>5}  {len(keep):>5}  '
-                          f'{repeats:>3}  {dest.name}')
+                          f'{repeats:>3}  {folder}')
 
         return moves, report
 
@@ -496,6 +509,7 @@ def run(params: dict, progress_callback) -> None:
     output_folder = params.get('output_folder', '').strip()
     leftovers_folder = params.get('leftovers_folder', '').strip()
     strategy = params.get('strategy', STRATEGY_CLUSTER)
+    structure = params.get('output_structure', STRUCTURE_FLAT) or STRUCTURE_FLAT
     dry_run = bool(params.get('dry_run', True))
 
     tolerance = _parse_number(params, 'tolerance', 0.60, float, 0.01, 2.0)
@@ -558,7 +572,8 @@ def run(params: dict, progress_callback) -> None:
 
     report = [
         f'Input:          {root}',
-        f'Strategy:       {strategy}',
+        f'Strategy:       {strategy}'
+        + (f'   Structure: {structure}' if strategy == STRATEGY_CLUSTER else ''),
         f'Images found:   {len(images)}',
         f'Tolerance:      {tolerance:g}   Min cluster size: {min_cluster_size}',
         f'Clusters:       {len(kept_ids)} kept, {len(outlier_ids)} below min size',
@@ -572,7 +587,8 @@ def run(params: dict, progress_callback) -> None:
     if strategy == STRATEGY_CLUSTER:
         plan = _Plan(images=images, embeds=embeds, tags=tags, clusters=clusters,
                      global_freq=global_freq, median=median, cap=cap,
-                     max_repeats=max_repeats, leftovers=leftovers)
+                     max_repeats=max_repeats, structure=structure,
+                     leftovers=leftovers)
         cluster_moves, cluster_report = plan.build(report_dir, kept_ids)
         moves.extend(cluster_moves)
         report.extend(cluster_report)
