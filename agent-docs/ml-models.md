@@ -111,6 +111,31 @@ Both use the same `selected_tags.csv` convention (`name`, `category` with
 `9` = rating filtered out). Thresholding uses the UI `min_probability` slider
 for both (animetimm's `best_threshold` column is ignored).
 
+### Embeddings from the tagger
+
+`convnextv2_huge.dbv4-full` is a plain timm `convnextv2_huge` with a
+`NormMlpClassifierHead`, so the head splits cleanly and **tags and embeddings
+come from one forward pass**:
+
+```python
+feats  = model.forward_features(tensor)             # (N, 2816, 16, 16)
+embeds = model.forward_head(feats, pre_logits=True) # (N, 2816)  <- embedding
+logits = model.forward_head(feats)                  # (N, 12476) <- tags
+```
+
+The 2816-d pre-logits vector is post-pool, post-LayerNorm, pre-`head.fc` — the
+right layer for cosine similarity. It is **not** L2-normalized; normalize
+before comparing. `model.reset_classifier(0)` yields a bit-identical vector but
+destroys the tag head, so prefer `pre_logits=True`.
+
+**Never run this model in fp16** — ConvNeXtV2's GRN takes a spatial L2 norm
+that overflows half range at 512px and the embeddings come out **all-NaN**. Use
+bf16 (same exponent range as fp32, cosine similarity 0.9996 vs fp32, ~2×
+faster) or plain fp32. See [gotchas-decisions.md](gotchas-decisions.md).
+
+Consumed by `extras_scripts/dataset_clustering.py` —
+see [dataset-clustering.md](dataset-clustering.md).
+
 ## LM Studio Captioner (Caption Tab)
 
 Natural-language captioning via a local LM Studio vision model. Client:

@@ -282,18 +282,13 @@ def set_input_image(workflow: dict, image_filename: str):
         workflow[node_id]['inputs']['image'] = image_filename
 
 
-def set_input_text(workflow: dict, text: str):
-    """Set the prompt text on all LTD_Input_Text nodes."""
-    for node_id in find_nodes_by_title(workflow, LTD_INPUT_TEXT):
-        workflow[node_id]['inputs']['text'] = text
-
-
-# Input keys a prompt-carrying node may expose, in preference order
+# Input keys a text-carrying node may expose, in preference order.
+# 'value' covers ComfyUI's native PrimitiveString / PrimitiveStringMultiline.
 _PROMPT_KEYS = ('text', 'prompt', 'string', 'value')
 
 
 def _prompt_key(inputs: dict) -> str:
-    """Pick the input key holding the prompt string on an LTD_Input_Prompt node."""
+    """Pick the input key holding the text string on an LTD text input node."""
     for key in _PROMPT_KEYS:
         if isinstance(inputs.get(key), str):
             return key
@@ -301,6 +296,13 @@ def _prompt_key(inputs: dict) -> str:
         if key in inputs:
             return key
     return 'text'
+
+
+def set_input_text(workflow: dict, text: str):
+    """Set the caption text on all LTD_Input_Text nodes."""
+    for node_id in find_nodes_by_title(workflow, LTD_INPUT_TEXT):
+        inputs = workflow[node_id].setdefault('inputs', {})
+        inputs[_prompt_key(inputs)] = text
 
 
 def get_input_prompt(workflow: dict) -> str | None:

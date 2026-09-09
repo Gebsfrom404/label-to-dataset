@@ -36,7 +36,7 @@ Only `LTD_Input_Image` + an output node are required; everything else is optiona
 
 Setters in `workflow.py`: `set_input_image`, `set_input_mask`, `set_input_text`, `set_input_prompt`, `set_latent_size`, `set_seed` (all operate on every node whose `_meta.title` matches the prefix). Predicates: `has_input_mask`, `has_input_prompt`, `get_input_prompt` (returns `None` when there is no prompt node, `''` when the node's value is linked rather than literal).
 
-`set_input_prompt` / `get_input_prompt` pick the node's input key from `_PROMPT_KEYS = ('text', 'prompt', 'string', 'value')` — first one holding a `str`, else first one present, else `'text'`. That way a `CLIPTextEncode`, a primitive string node, or a custom node all work.
+`set_input_text`, `set_input_prompt` and `get_input_prompt` all pick the node's input key from `_PROMPT_KEYS = ('text', 'prompt', 'string', 'value')` — first one holding a `str`, else first one present, else `'text'`. That way a `CLIPTextEncode`, a custom `Text Multiline` node (`text`) and ComfyUI's native `PrimitiveString` / `PrimitiveStringMultiline` (`value`) all work. `set_input_text` used to hard-code `'text'`, which silently generated from an empty prompt once a workflow swapped its `LTD_Input_Text` node to the native primitive — see gotchas-decisions.md.
 
 ### Validation
 

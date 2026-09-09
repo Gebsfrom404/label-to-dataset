@@ -223,3 +223,47 @@ score ≥0.996; the edited pair scores 0.961 and needs tolerance 34+.
 against each other, check the *ordering* on real examples before tuning the
 threshold. Both bugs in this feature presented as "wrong threshold" and
 neither was.
+
+## convnextv2_huge Tagger Emits All-NaN Embeddings in fp16
+
+Running `animetimm/convnextv2_huge.dbv4-full` under
+`torch.autocast('cuda', dtype=torch.float16)` produces **all-NaN** embeddings —
+every row, silently. Casting the input to `.half()` or not makes no difference.
+
+Cause: ConvNeXtV2's GRN (global response normalization) takes a spatial L2 norm
+over the feature map, which overflows fp16 range at 512px input.
+
+The failure surfaces far downstream as a confusing scipy error:
+`ValueError: The condensed distance matrix must contain only finite values.`
+
+Fix: use **bf16** (same exponent range as fp32, so no overflow; cosine
+similarity 0.9996 vs fp32; ~2× faster than fp32) when
+`torch.cuda.is_bf16_supported()`, else plain fp32. Never fp16.
+
+`dataset_clustering.py` also guards both ends: it refuses to cache non-finite
+embeddings, and `_load_cache()` drops non-finite rows so a cache poisoned by an
+older run heals itself.
+
+## Extras `progress_callback` Was a Dead-End for Cancellation
+
+`_ScriptWorker` has `cancel()` and `is_cancelled`, but nothing was passed to the
+running script, so `run()` could never be interrupted — a problem once a script
+does minutes of GPU work. `_progress_callback` now **returns `self._is_cancelled`**,
+which scripts poll. Backward compatible: existing scripts ignore the return value.
+
+## `set_input_text` Hard-Coded the `text` Input Key
+
+"Generate from caption (yiffymix)" stopped producing the caption after its
+`LTD_Input_Text` node was swapped from a custom `Text Multiline` node to
+ComfyUI's native `PrimitiveStringMultiline`. The native primitive exposes its
+string as `value`, not `text`, so `set_input_text` wrote the caption into an
+input the node ignores and the graph rendered from an empty prompt (the
+concatenated quality tags only).
+
+Fix: `set_input_text` now resolves the key through `_prompt_key()` /
+`_PROMPT_KEYS`, the same detection `set_input_prompt` already used. Any node
+carrying its string in `text`, `prompt`, `string` or `value` works.
+
+Watch for the same class of bug whenever a workflow is re-saved against a newer
+ComfyUI that replaced a custom node with a native equivalent — the LTD title
+still matches, so validation passes and the failure is silent.

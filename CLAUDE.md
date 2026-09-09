@@ -27,4 +27,5 @@ When you change code that is covered by an agent doc, update that doc in the sam
 | [comfyui-integration.md](agent-docs/comfyui-integration.md) | ComfyUI client, workflows, LTD_* node convention |
 | [ml-models.md](agent-docs/ml-models.md) | YOLO, LaMa, WD tagger (timm/safetensors preprocessing) |
 | [duplicate-detection.md](agent-docs/duplicate-detection.md) | Duplicate search: pHash / ORB, tolerance, originals, delete marks |
+| [dataset-clustering.md](agent-docs/dataset-clustering.md) | Extras clustering script: embeddings, linkage choice, capping, repeats |
 | [gotchas-decisions.md](agent-docs/gotchas-decisions.md) | Past bugs and fixes — read before debugging |
