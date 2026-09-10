@@ -1,4 +1,3 @@
-from PySide6.QtCore import Qt
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import QApplication, QMainWindow, QTabWidget
 
@@ -11,8 +10,8 @@ from ltd.tabs.train_tab import TrainTab
 from ltd.tabs.gen_images_tab import GenImagesTab
 from ltd.tabs.duplicates_tab import DuplicatesTab
 from ltd.tabs.extras_tab import ExtrasTab
+from ltd.tabs.settings_tab import SettingsTab
 from ltd.utils.file_utils import cleanup_all_temp
-from ltd.widgets.toolbar_widget import ToolbarWidget
 
 
 class MainWindow(QMainWindow):
@@ -21,10 +20,6 @@ class MainWindow(QMainWindow):
         self.app = app
         self.settings = get_settings()
         self.setWindowTitle('Label-to-Dataset')
-
-        # Toolbar
-        self.toolbar = ToolbarWidget(self)
-        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.toolbar)
 
         # Tab widget
         self.tab_widget = QTabWidget()
@@ -38,6 +33,7 @@ class MainWindow(QMainWindow):
         self.gen_images_tab = GenImagesTab(self)
         self.duplicates_tab = DuplicatesTab(self)
         self.extras_tab = ExtrasTab(self)
+        self.settings_tab = SettingsTab(self)
 
         self.tab_widget.addTab(self.label_tab, 'Label')
         self.tab_widget.addTab(self.modify_tab, 'Modify')
@@ -46,10 +42,11 @@ class MainWindow(QMainWindow):
         self.tab_widget.addTab(self.gen_images_tab, 'Manage Gen Images')
         self.tab_widget.addTab(self.duplicates_tab, 'Manage Duplicates')
         self.tab_widget.addTab(self.extras_tab, 'Extras')
+        self.tab_widget.addTab(self.settings_tab, 'Settings')
 
-        # Connect toolbar signals
-        self.toolbar.theme_changed.connect(self._on_theme_changed)
-        self.toolbar.font_size_changed.connect(self._on_font_size_changed)
+        # Connect settings signals
+        self.settings_tab.theme_changed.connect(self._on_theme_changed)
+        self.settings_tab.font_size_changed.connect(self._on_font_size_changed)
 
         # Connect inter-tab signals
         self._connect_tab_signals()

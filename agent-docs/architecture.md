@@ -9,8 +9,10 @@ Warnings suppressed unless `LTD_ENVIRONMENT=development`.
 ## Tabs
 
 ```
-Label → Modify → Caption → Train YOLO → Manage Gen Images → Manage Duplicates → Extras
+Label → Modify → Caption → Train YOLO → Manage Gen Images → Manage Duplicates → Extras → Settings
 ```
+
+There is no top toolbar: server URLs, the local-server API key, theme and font size live in the `Settings` tab.
 
 Each tab is a QWidget in `ltd/tabs/`. MainWindow holds them in a QTabWidget and mediates inter-tab communication via signals. Data passes through temp folders (`ltd/utils/file_utils.py`).
 
@@ -32,7 +34,9 @@ Each tab is a QWidget in `ltd/tabs/`. MainWindow holds them in a QTabWidget and 
 | Image list (Modify) | `ltd/widgets/image_list_widget.py` | Simple image list widget used by ModifyTab |
 | Module selector | `ltd/widgets/module_selector.py` | Plugin dropdown + dynamic settings panel, QSettings persistence |
 | Settings widgets | `ltd/widgets/settings_widgets.py` | Auto-persisting QSettings-bound Qt widgets |
-| Toolbar | `ltd/widgets/toolbar_widget.py` | ComfyUI URL, LM Studio URL, theme toggle, font size |
+| Settings tab | `ltd/tabs/settings_tab.py` | Last tab. ComfyUI URL, Local server URL + API key (each with a Test button), theme, font size. Emits `theme_changed` / `font_size_changed` → MainWindow. Replaced the old top toolbar and the unused `SettingsDialog` |
+| Local server client | `ltd/localserver/client.py` | OpenAI-compatible VLM client with runtime flavor detection — see [ml-models.md](ml-models.md) |
+| Resize grip | `ltd/widgets/resize_grip.py` | `HeightResizeGrip(target, minimum, default, settings_key, container)`: 8 px drag bar placed under a widget (zero-spacing layout) that sets the target's fixed height and persists it. With `container`, growth is capped at the container layout's free space (`height() - layout().sizeHint().height()`) measured at drag start, so content below never overflows. Used under the Caption tab's Local server system prompt |
 | Collapsible panel | `ltd/widgets/collapsible_panel.py` | Expandable/collapsible QFrame with header button (used by Extras tab) |
 | Loading dialog | `ltd/widgets/loading_dialog.py` | Frameless modal dialog. Indeterminate by default; call `set_progress(current, total)` to switch to determinate. Shared by every tab that does mass loading (Label, Modify, Caption, Manage Gen Images) |
 | Info button | `ltd/widgets/info_button.py` | Small "ⓘ" QToolButton with rich-text tooltip. `InfoButton(html)` is static; `DynamicInfoButton(provider)` calls a `() → str` each time so content can change with focus. `focus_in(widget)` helper checks if a widget contains `QApplication.focusWidget()` |
@@ -48,7 +52,6 @@ Each tab is a QWidget in `ltd/tabs/`. MainWindow holds them in a QTabWidget and 
 | Workflow selector | `ltd/widgets/workflow_selector.py` | Dropdown for ComfyUI `.json` workflows with validation |
 | Find & replace | `ltd/dialogs/find_replace_dialog.py` | Find/replace dialog for caption tags |
 | Batch reorder | `ltd/dialogs/batch_reorder_dialog.py` | Batch reorder tags dialog |
-| Settings dialog | `ltd/dialogs/settings_dialog.py` | Application settings dialog |
 
 ## Inter-Tab Data Flow
 

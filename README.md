@@ -95,7 +95,7 @@ The token is stored in `~/.cache/huggingface/` and reused on every subsequent ru
 Detection, modification and captioning can run through a ComfyUI instance instead of the built-in modules.
 
 1. Start ComfyUI (`--highvram` recommended, so models aren't reloaded for every image).
-2. Set the ComfyUI URL in the app toolbar (default: `http://127.0.0.1:8188`).
+2. Set the ComfyUI URL in the Settings tab (default: `http://127.0.0.1:8188`).
 3. Drop API-format `.json` workflows into `./Comfy-workflows/` — they show up in the workflow dropdowns. UI-format workflows (Ctrl+S in ComfyUI) are converted automatically.
 
 LTD passes images in and out by **node title**, so the relevant LoadImage/SaveImage/PreviewImage nodes must be titled:

@@ -39,6 +39,7 @@ from ltd.utils.image_utils import load_pixmap, load_pixmap_preview
 from ltd.widgets.caption_image_list import CaptionImageList
 from ltd.widgets.elided_label import ElidedLabel
 from ltd.widgets.loading_dialog import loading_dialog
+from ltd.widgets.resize_grip import HeightResizeGrip
 from ltd.widgets.tag_completer_popup import TagCompleterPopup
 from ltd.widgets.workflow_selector import WorkflowSelector
 from ltd.workers.caption_worker import CaptionWorker
@@ -233,8 +234,11 @@ def strip_thinking(text: str) -> str:
     return cleaned.strip()
 
 
-class LMStudioCaptioner:
-    """Natural-language captioning via an LM Studio vision model.
+class LocalServerCaptioner:
+    """Natural-language captioning via a vision model on a local server.
+
+    Any OpenAI-compatible server works (Unsloth Studio, LM Studio, Ollama,
+    llama.cpp, vLLM, ...) — see ``ltd/localserver/client.py``.
 
     Produces a single caption per image (returned split on the tag separator
     so it round-trips with the shared .txt storage). Always overwrites the
@@ -247,11 +251,16 @@ class LMStudioCaptioner:
     replaces_caption = True
 
     def __init__(self, model: str, system_prompt: str = '',
-                 append_context: bool = False, separator: str = ', '):
+                 append_context: bool = False, separator: str = ', ',
+                 max_megapixels: float = 1.0, unload_after: bool = True):
+        from ltd.localserver.client import LocalServerClient
+        self.client = LocalServerClient()
         self.model = model
         self.system_prompt = system_prompt
         self.append_context = append_context
         self.separator = separator
+        self.max_megapixels = max_megapixels
+        self.unload_after = unload_after
 
     def _current_caption(self, image_path: Path) -> str:
         txt = image_path.with_suffix('.txt')
@@ -263,9 +272,6 @@ class LMStudioCaptioner:
         return ''
 
     def caption(self, image_path: Path) -> list[str]:
-        from ltd.lmstudio.client import LMStudioClient
-        client = LMStudioClient()
-
         user_text = None
         if self.append_context:
             existing = self._current_caption(image_path)
@@ -273,9 +279,10 @@ class LMStudioCaptioner:
                 user_text = ('Here is the current caption/tags describing '
                              f'this image, use it as context: {existing}')
 
-        raw = client.caption(image_path, self.model,
-                             system_prompt=self.system_prompt,
-                             user_text=user_text)
+        raw = self.client.caption(image_path, self.model,
+                                  system_prompt=self.system_prompt,
+                                  user_text=user_text,
+                                  max_megapixels=self.max_megapixels)
         caption = strip_thinking(raw)
         if not caption:
             return []
@@ -284,11 +291,8 @@ class LMStudioCaptioner:
 
     def finalize(self):
         """Called once after the batch — unload the model to free memory."""
-        from ltd.lmstudio.client import LMStudioClient
-        try:
-            LMStudioClient().unload_model(self.model)
-        except Exception:
-            pass
+        if self.unload_after:
+            self.client.unload_model(self.model)
 
 
 def generated_cache_name(image: ImageItem) -> str:
@@ -894,9 +898,9 @@ class CaptionTab(QWidget):
         # export and undo all reuse the tag machinery unchanged.
         self._panel_mode = 'tags'  # 'tags' | 'caption'
         self._loading_caption = False
-        # Suppresses the LM Studio model auto-query until construction is done,
-        # so restoring an LM-Studio captioner selection can't block startup on
-        # a network request.
+        # Suppresses the local-server model auto-query until construction is
+        # done, so restoring a Local server captioner selection can't block
+        # startup on a network request.
         self._lm_autorefresh_enabled = False
 
         # Caption→image generation (ComfyUI) + comparison cache.
@@ -922,7 +926,7 @@ class CaptionTab(QWidget):
         self._setup_shortcuts()
         self._restore_settings()
         self._connect_settings_persistence()
-        # Construction done — LM Studio model queries may now run on demand.
+        # Construction done — local-server model queries may now run on demand.
         self._lm_autorefresh_enabled = True
 
     # ------------------------------------------------------------------
@@ -1029,7 +1033,8 @@ class CaptionTab(QWidget):
         for cls in self._WD_MODELS:
             self.captioner_combo.addItem(cls.MODEL_REPO)
         self.captioner_combo.addItem('ComfyUI Workflow')
-        self.captioner_combo.addItem('LM Studio')
+        # Persisted by index, so renaming this entry keeps saved selections.
+        self.captioner_combo.addItem('Local server')
         caption_layout.addWidget(self.captioner_combo)
 
         # WD Tagger settings
@@ -1086,47 +1091,78 @@ class CaptionTab(QWidget):
         caption_layout.addWidget(self.comfy_settings)
         self.comfy_settings.setVisible(False)
 
-        # LM Studio settings
-        self.lmstudio_settings = QWidget()
-        lm_layout = QVBoxLayout(self.lmstudio_settings)
+        # Local server settings (URL + API key live in the Settings tab)
+        self.local_server_settings = QWidget()
+        lm_layout = QVBoxLayout(self.local_server_settings)
         lm_layout.setContentsMargins(0, 0, 0, 0)
 
         lm_model_row = QHBoxLayout()
         lm_model_row.addWidget(QLabel('Model:'))
-        self.lmstudio_model_combo = QComboBox()
-        self.lmstudio_model_combo.setEditable(True)
-        self.lmstudio_model_combo.setPlaceholderText(
+        self.local_server_model_combo = QComboBox()
+        self.local_server_model_combo.setEditable(True)
+        self.local_server_model_combo.setPlaceholderText(
             'Refresh to load models')
-        self.lmstudio_model_combo.setSizePolicy(
+        self.local_server_model_combo.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        lm_model_row.addWidget(self.lmstudio_model_combo, 1)
-        self.lmstudio_refresh_btn = QPushButton('Refresh')
-        self.lmstudio_refresh_btn.setToolTip(
-            'Query the LM Studio URL for loaded models')
-        lm_model_row.addWidget(self.lmstudio_refresh_btn)
+        lm_model_row.addWidget(self.local_server_model_combo, 1)
+        self.local_server_refresh_btn = QPushButton('Refresh')
+        self.local_server_refresh_btn.setToolTip(
+            'Detect the server set in the Settings tab and list its models')
+        lm_model_row.addWidget(self.local_server_refresh_btn)
         lm_layout.addLayout(lm_model_row)
 
         lm_layout.addWidget(QLabel('System prompt:'))
-        self.lmstudio_system_prompt = QPlainTextEdit()
-        self.lmstudio_system_prompt.setPlaceholderText(
+        self.local_server_system_prompt = QPlainTextEdit()
+        self.local_server_system_prompt.setPlaceholderText(
             'Instructions for the captioning model...')
-        # Preferred (not Expanding) vertical policy so the panel stays compact
-        # and the tab's bottom stretch absorbs slack — otherwise the leftover
+        # Fixed vertical policy: the height comes from the drag grip below, and
+        # the tab's bottom stretch absorbs slack — otherwise the leftover
         # space inflates the label above and opens a gap.
-        self.lmstudio_system_prompt.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        self.lmstudio_system_prompt.setMinimumHeight(90)
-        self.lmstudio_system_prompt.setMaximumHeight(160)
-        lm_layout.addWidget(self.lmstudio_system_prompt)
+        self.local_server_system_prompt.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        # Drag grip under the box; growth is capped by the free space left in
+        # the Auto-Caption page so the buttons below never leave the view.
+        self.local_server_prompt_grip = HeightResizeGrip(
+            self.local_server_system_prompt, minimum=60, default=120,
+            settings_key='caption/local_server_prompt_height',
+            container=caption_tab_w)
+        prompt_box = QVBoxLayout()
+        prompt_box.setSpacing(0)  # grip hugs the box it resizes
+        prompt_box.addWidget(self.local_server_system_prompt)
+        prompt_box.addWidget(self.local_server_prompt_grip)
+        lm_layout.addLayout(prompt_box)
 
-        self.lmstudio_append_check = QCheckBox('Append current caption')
-        self.lmstudio_append_check.setToolTip(
+        max_mp_row = QHBoxLayout()
+        max_mp_row.addWidget(QLabel('Max image size:'))
+        self.local_server_max_mp_spin = QDoubleSpinBox()
+        self.local_server_max_mp_spin.setRange(0.0, 16.0)
+        self.local_server_max_mp_spin.setSingleStep(0.25)
+        self.local_server_max_mp_spin.setDecimals(2)
+        self.local_server_max_mp_spin.setSuffix(' MP')
+        self.local_server_max_mp_spin.setSpecialValueText('Original')
+        self.local_server_max_mp_spin.setValue(1.0)
+        self.local_server_max_mp_spin.setToolTip(
+            'Downscale images to this many megapixels before sending — '
+            'smaller uploads and fewer vision tokens. 0 sends the original.')
+        max_mp_row.addWidget(self.local_server_max_mp_spin)
+        max_mp_row.addStretch()
+        lm_layout.addLayout(max_mp_row)
+
+        self.local_server_append_check = QCheckBox('Append current caption')
+        self.local_server_append_check.setToolTip(
             'Send this image\'s current caption/tags to the model as context. '
             'The generated caption overwrites the file either way.')
-        lm_layout.addWidget(self.lmstudio_append_check)
+        lm_layout.addWidget(self.local_server_append_check)
 
-        caption_layout.addWidget(self.lmstudio_settings)
-        self.lmstudio_settings.setVisible(False)
+        self.local_server_unload_check = QCheckBox('Unload model after batch')
+        self.local_server_unload_check.setChecked(True)
+        self.local_server_unload_check.setToolTip(
+            'Free VRAM when captioning finishes. Supported on Unsloth Studio, '
+            'LM Studio, Ollama and llama.cpp (router mode).')
+        lm_layout.addWidget(self.local_server_unload_check)
+
+        caption_layout.addWidget(self.local_server_settings)
+        self.local_server_settings.setVisible(False)
 
         cap_btn_layout = QHBoxLayout()
         self.caption_current_btn = QPushButton('Current')
@@ -1466,8 +1502,8 @@ class CaptionTab(QWidget):
         # Captioner
         self.captioner_combo.currentIndexChanged.connect(
             self._on_captioner_changed)
-        self.lmstudio_refresh_btn.clicked.connect(
-            self._refresh_lmstudio_models)
+        self.local_server_refresh_btn.clicked.connect(
+            self._refresh_local_server_models)
         self.caption_current_btn.clicked.connect(
             lambda: self._run_captioning(mode='current'))
         self.caption_selected_btn.clicked.connect(
@@ -1640,14 +1676,18 @@ class CaptionTab(QWidget):
             s.value('caption/captioner', 0, type=int))
         self.separator_input.setText(
             s.value('caption/tag_separator', ', ', type=str))
-        # LM Studio captioner settings
-        self.lmstudio_system_prompt.setPlainText(
-            s.value('caption/lmstudio_system_prompt', '', type=str))
-        self.lmstudio_append_check.setChecked(
-            s.value('caption/lmstudio_append', False, type=bool))
-        saved_model = s.value('caption/lmstudio_model', '', type=str)
+        # Local server captioner settings
+        self.local_server_system_prompt.setPlainText(
+            s.value('caption/local_server_system_prompt', '', type=str))
+        self.local_server_append_check.setChecked(
+            s.value('caption/local_server_append', False, type=bool))
+        self.local_server_max_mp_spin.setValue(
+            s.value('caption/local_server_max_mp', 1.0, type=float))
+        self.local_server_unload_check.setChecked(
+            s.value('caption/local_server_unload', True, type=bool))
+        saved_model = s.value('caption/local_server_model', '', type=str)
         if saved_model:
-            self.lmstudio_model_combo.setCurrentText(saved_model)
+            self.local_server_model_combo.setCurrentText(saved_model)
         # Fast insertion (tags first, then mode, then enable — enable toggles
         # the shortcuts, so it must be applied last).
         for i, edit in enumerate(self.fast_insert_inputs):
@@ -1683,14 +1723,18 @@ class CaptionTab(QWidget):
         self.separator_input.editingFinished.connect(
             lambda: self._save_setting('tag_separator',
                                        self.separator_input.text()))
-        self.lmstudio_model_combo.currentTextChanged.connect(
-            lambda v: self._save_setting('lmstudio_model', v))
-        self.lmstudio_system_prompt.textChanged.connect(
+        self.local_server_model_combo.currentTextChanged.connect(
+            lambda v: self._save_setting('local_server_model', v))
+        self.local_server_system_prompt.textChanged.connect(
             lambda: self._save_setting(
-                'lmstudio_system_prompt',
-                self.lmstudio_system_prompt.toPlainText()))
-        self.lmstudio_append_check.toggled.connect(
-            lambda v: self._save_setting('lmstudio_append', v))
+                'local_server_system_prompt',
+                self.local_server_system_prompt.toPlainText()))
+        self.local_server_append_check.toggled.connect(
+            lambda v: self._save_setting('local_server_append', v))
+        self.local_server_max_mp_spin.valueChanged.connect(
+            lambda v: self._save_setting('local_server_max_mp', v))
+        self.local_server_unload_check.toggled.connect(
+            lambda v: self._save_setting('local_server_unload', v))
         # Fast insertion (enable persistence lives in its toggle handler)
         self.fast_insert_mode.currentIndexChanged.connect(
             lambda v: self._save_setting('fast_insert_mode', v))
@@ -2883,46 +2927,51 @@ class CaptionTab(QWidget):
     def _on_captioner_changed(self, index):
         text = self.captioner_combo.currentText()
         is_comfy = text == 'ComfyUI Workflow'
-        is_lm = text == 'LM Studio'
-        is_wd = not is_comfy and not is_lm
+        is_local = text == 'Local server'
+        is_wd = not is_comfy and not is_local
         self.wd_settings.setVisible(is_wd)
         self.comfy_settings.setVisible(is_comfy)
-        self.lmstudio_settings.setVisible(is_lm)
-        # Auto-populate the model list the first time LM Studio is shown
+        self.local_server_settings.setVisible(is_local)
+        # Auto-populate the model list the first time Local server is shown
         # (skipped during startup restore to avoid a blocking network call).
-        if (is_lm and self._lm_autorefresh_enabled
-                and self.lmstudio_model_combo.count() == 0):
-            self._refresh_lmstudio_models()
+        if (is_local and self._lm_autorefresh_enabled
+                and self.local_server_model_combo.count() == 0):
+            self._refresh_local_server_models()
 
-    def _refresh_lmstudio_models(self):
-        """Query the LM Studio URL and fill the model dropdown."""
-        from ltd.lmstudio.client import LMStudioClient
-        self.caption_status.setText('LM Studio: querying models...')
+    def _refresh_local_server_models(self):
+        """Detect the local server's flavor and fill the model dropdown."""
+        from ltd.localserver.client import FLAVOR_LABELS, LocalServerClient
+        self.caption_status.setText('Local server: querying models...')
         QApplication.processEvents()
+        client = LocalServerClient()
+        label = 'Local server'
         try:
-            models = LMStudioClient().list_models()
+            # Re-detect: a different app may now be serving the same URL.
+            label = FLAVOR_LABELS[client.detect_flavor(refresh=True)]
+            models, vision_filtered = client.list_models()
         except Exception as e:
-            self.caption_status.setText(f'LM Studio: {e}')
+            self.caption_status.setText(f'{label}: {e}')
             return
         # Preserve the current/saved selection across a refresh.
-        target = self.lmstudio_model_combo.currentText().strip() or \
-            get_settings().value('caption/lmstudio_model', '', type=str)
-        self.lmstudio_model_combo.blockSignals(True)
-        self.lmstudio_model_combo.clear()
-        self.lmstudio_model_combo.addItems(models)
+        target = self.local_server_model_combo.currentText().strip() or \
+            get_settings().value('caption/local_server_model', '', type=str)
+        self.local_server_model_combo.blockSignals(True)
+        self.local_server_model_combo.clear()
+        self.local_server_model_combo.addItems(models)
         # Default to the last-used model if it's still available, otherwise
         # leave the selector empty rather than auto-picking the first entry.
         if target and target in models:
-            self.lmstudio_model_combo.setCurrentText(target)
+            self.local_server_model_combo.setCurrentText(target)
         else:
-            self.lmstudio_model_combo.setCurrentIndex(-1)
-        self.lmstudio_model_combo.blockSignals(False)
+            self.local_server_model_combo.setCurrentIndex(-1)
+        self.local_server_model_combo.blockSignals(False)
+        # Only claim "vision" when the server actually reported capabilities.
+        kind = 'vision model(s)' if vision_filtered else 'model(s)'
         if models:
             self.caption_status.setText(
-                f'LM Studio: {len(models)} vision model(s) available')
+                f'{label}: {len(models)} {kind} available')
         else:
-            self.caption_status.setText(
-                'LM Studio: no vision-capable models found')
+            self.caption_status.setText(f'{label}: no {kind} found')
 
     def _create_captioner(self):
         text = self.captioner_combo.currentText()
@@ -2933,19 +2982,21 @@ class CaptionTab(QWidget):
                 QMessageBox.warning(self, 'Warning', 'No workflow provided.')
                 return None
             return ComfyUICaptioner(workflow_text)
-        elif text == 'LM Studio':
-            model = self.lmstudio_model_combo.currentText().strip()
+        elif text == 'Local server':
+            model = self.local_server_model_combo.currentText().strip()
             if not model:
                 QMessageBox.warning(
                     self, 'Warning',
-                    'No LM Studio model selected. Click Refresh to load '
-                    'the models from your LM Studio instance.')
+                    'No local server model selected. Click Refresh to load '
+                    'the models from the server set in the Settings tab.')
                 return None
-            return LMStudioCaptioner(
+            return LocalServerCaptioner(
                 model=model,
-                system_prompt=self.lmstudio_system_prompt.toPlainText(),
-                append_context=self.lmstudio_append_check.isChecked(),
+                system_prompt=self.local_server_system_prompt.toPlainText(),
+                append_context=self.local_server_append_check.isChecked(),
                 separator=self._get_separator(),
+                max_megapixels=self.local_server_max_mp_spin.value(),
+                unload_after=self.local_server_unload_check.isChecked(),
             )
         else:
             exclude_text = self.exclude_input.text().strip()
@@ -2959,7 +3010,7 @@ class CaptionTab(QWidget):
 
     def _merge_tags(self, existing: list[str], new_tags: list[str]) -> list[str]:
         """Merge new tags based on caption position setting."""
-        # Some captioners (LM Studio) produce a complete caption that replaces
+        # Some captioners (Local server) produce a complete caption that replaces
         # the existing one regardless of the WD-tagger Position combo.
         if getattr(self, '_caption_replace', False):
             return list(new_tags)
@@ -2975,7 +3026,7 @@ class CaptionTab(QWidget):
         captioner = self._create_captioner()
         if captioner is None:
             return
-        # Whether results overwrite the caption (LM Studio) or merge via the
+        # Whether results overwrite the caption (Local server) or merge via the
         # Position combo (WD taggers / ComfyUI).
         self._caption_replace = getattr(captioner, 'replaces_caption', False)
 

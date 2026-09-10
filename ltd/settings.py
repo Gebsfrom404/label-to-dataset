@@ -8,7 +8,8 @@ DEFAULT_SETTINGS = {
     'font_size': 12,
     'theme': 'dark',
     'comfyui_url': 'http://127.0.0.1:8188',
-    'lmstudio_url': 'http://localhost:1234',
+    'local_server_url': 'http://localhost:1234',
+    'local_server_api_key': '',
     'image_list_image_width': 160,
     'image_list_file_formats': 'bmp, gif, jpg, jpeg, png, tif, tiff, webp',
     'tag_separator': ', ',
@@ -20,6 +21,14 @@ DEFAULT_SETTINGS = {
     'detection_confidence': 0.25,
     'mask_grow': 5,
     'train_split': 80,
+}
+
+# Keys renamed when the LM Studio captioner became the generic "Local server".
+_RENAMED_KEYS = {
+    'lmstudio_url': 'local_server_url',
+    'caption/lmstudio_model': 'caption/local_server_model',
+    'caption/lmstudio_system_prompt': 'caption/local_server_system_prompt',
+    'caption/lmstudio_append': 'caption/local_server_append',
 }
 
 
@@ -45,3 +54,15 @@ class TypedSettings(QSettings):
 
 def get_settings() -> TypedSettings:
     return TypedSettings('LabelToDataset', 'LabelToDataset')
+
+
+def migrate_settings():
+    """Move values stored under renamed keys to their new names (runs at startup)."""
+    settings = get_settings()
+    for old, new in _RENAMED_KEYS.items():
+        if not settings.contains(old):
+            continue
+        value = settings.value(old)
+        if value not in (None, '') and not settings.contains(new):
+            settings.setValue(new, value)
+        settings.remove(old)

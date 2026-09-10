@@ -4,7 +4,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QIcon, QImageReader, QPalette
 from PySide6.QtWidgets import QApplication
 
-from ltd.settings import get_settings, DEFAULT_SETTINGS
+from ltd.settings import get_settings, migrate_settings, DEFAULT_SETTINGS
 
 
 def _dark_palette() -> QPalette:
@@ -73,6 +73,7 @@ def create_application() -> QApplication:
         app.setWindowIcon(QIcon(str(icon_path)))
     QImageReader.setAllocationLimit(0)
 
+    migrate_settings()
     settings = get_settings()
     font = app.font()
     font_size = settings.value('font_size',

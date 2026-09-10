@@ -267,3 +267,27 @@ carrying its string in `text`, `prompt`, `string` or `value` works.
 Watch for the same class of bug whenever a workflow is re-saved against a newer
 ComfyUI that replaced a custom node with a native equivalent — the LTD title
 still matches, so validation passes and the failure is silent.
+
+## Settings Tab Collapsed to ~450px and Clipped Its Text
+
+**Symptom:** the Settings tab was a narrow column on any window width, and the
+Local server panel clipped its description (two of three lines) and the API key
+field below it.
+
+**Cause:** two layout mistakes compounding. (1) The content widget was added
+with `outer.addWidget(content, 0, Qt.AlignmentFlag.AlignLeft)`. An aligned
+layout item gets its **size hint**, not the cell width — and word-wrapped
+`QLabel`s report a narrow hint, so the whole column stayed ~450px even at
+1400px. (2) The wrapped description was a spanning `QFormLayout` row
+(`form.addRow(label)`), which didn't get the height its wrapped text needed at
+that width, so it was clipped and squeezed the rows beneath.
+
+**Fix:** add the content with no alignment and a `setMaximumWidth(900)` (it
+fills the tab up to that, left-anchored); put wrapped labels in the group's
+`QVBoxLayout` around the `QFormLayout`, not inside it. Status labels are hidden
+while empty so they don't reserve a blank line.
+
+**Lesson:** to cap a panel's width, use a maximum width, not an alignment flag.
+Verify layouts with real fonts — the offscreen platform has none (text renders
+as boxes), so set `QT_QPA_FONTDIR=C:\Windows\Fonts` before rendering, and
+compare each wrapped label's `heightForWidth(width())` with its `height()`.

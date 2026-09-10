@@ -61,11 +61,11 @@ Auto-captioning using timm-based tagger models. Implemented in caption_tab.py.
 `WdTaggerCaptioner` is the base (SmilingWolf `wd-eva02-large-tagger-v3`);
 `AnimeTimmCaptioner` subclasses it for `animetimm/convnextv2_huge.dbv4-full`.
 The `CaptionTab._WD_MODELS` tuple lists the WD-style taggers shown in the
-Auto-Caption dropdown, followed by the `ComfyUI Workflow` and `LM Studio`
+Auto-Caption dropdown, followed by the `ComfyUI Workflow` and `Local server`
 entries. Dispatch (`_on_captioner_changed` / `_create_captioner`) is by the
 combo's current *text* for the two special entries, falling back to
 `_WD_MODELS[index]` for the taggers; each captioner has its own settings panel
-(`wd_settings` / `comfy_settings` / `lmstudio_settings`), one visible at a time.
+(`wd_settings` / `comfy_settings` / `local_server_settings`), one visible at a time.
 
 ### Stack: timm + safetensors (PyTorch)
 
@@ -136,41 +136,78 @@ faster) or plain fp32. See [gotchas-decisions.md](gotchas-decisions.md).
 Consumed by `extras_scripts/dataset_clustering.py` —
 see [dataset-clustering.md](dataset-clustering.md).
 
-## LM Studio Captioner (Caption Tab)
+## Local Server Captioner (Caption Tab)
 
-Natural-language captioning via a local LM Studio vision model. Client:
-`ltd/lmstudio/client.py` (`LMStudioClient`) — uses LM Studio's OpenAI-compatible
-REST API (`requests`, no extra SDK), mirroring `ltd/comfyui/client.py`:
-- URL from the `lmstudio_url` setting (toolbar field, default
-  `http://localhost:1234`); `/v1` is appended if absent.
-- `list_models(vision_only=True)` fills the **Model** dropdown with only
-  vision-capable models. It queries LM Studio's **native** `GET /api/v0/models`
-  (which reports a per-model `type` of `llm`/`vlm`/`embeddings`) and keeps only
-  `type == 'vlm'`. If that endpoint is missing (older LM Studio), it falls back
-  to `GET /v1/models`, which carries no capability info, so filtering is skipped
-  there. Triggered by the **Refresh** button or the first on-demand switch to
-  LM Studio — never during startup restore (gated by `_lm_autorefresh_enabled`),
-  so a down server can't block launch.
-- `caption(path, model, system_prompt, user_text)` → `POST /v1/chat/completions`
-  with the image inlined as a base64 `data:` URI and the system prompt as a
-  `system` message.
+Natural-language captioning via a vision model on any local OpenAI-compatible
+server (was "LM Studio" before; the user runs Unsloth Studio). Client:
+`ltd/localserver/client.py` (`LocalServerClient`) — `requests`, no SDK,
+mirroring `ltd/comfyui/client.py`:
+- URL + API key from the `local_server_url` / `local_server_api_key` settings
+  (Settings tab; default `http://localhost:1234`, key empty). `/v1` is optional
+  in the URL. A non-empty key is sent as `Authorization: Bearer` on **every**
+  request — Unsloth Studio returns 401 on `/v1/*` without one (unless keyless
+  API access is enabled in Studio), and so does llama.cpp started with
+  `--api-key`. 401/403 raise `PermissionError` with a "set the API key" hint.
+- **Flavor detection** (`detect_flavor(refresh=False)`), cached per
+  (URL, key) in a module dict. `GET /api/health` is probed first and doubles as
+  the reachability check (connection failure → `ConnectionError`, no further
+  probes). Then, in order: `Server` header containing `unsloth` (Studio sends
+  `unsloth-studio`) or health `service` containing "Unsloth" → Unsloth Studio;
+  `Server: llama.cpp` → llama.cpp; `GET /api/v0/models` has `data` → LM Studio;
+  `GET /api/version` has `version` → Ollama; `GET /props` has
+  `default_generation_settings`/`modalities` → llama.cpp; `GET /version` has
+  `version` → vLLM; else generic OpenAI. Order matters: Unsloth answers
+  `/props` and `/version` with 401, so it must be matched before those probes.
+- `list_models(vision_only=True)` → `(ids, vision_filtered)`. Per flavor:
+  LM Studio native `/api/v0/models` `type == 'vlm'` (filtered); Ollama
+  `/api/tags` + `POST /api/show` `capabilities` contains `vision`; llama.cpp
+  `/v1/models` + `/props` `modalities.vision`; **Unsloth** `/v1/models` lists
+  every downloaded model with a `loaded` flag — loaded first, and the loaded
+  model is dropped only when `/v1/status` says `is_vision: false` (capabilities
+  are unknown for the others, so `vision_filtered` is False); vLLM / generic:
+  `/v1/models` unfiltered. The Caption tab status line only says "vision
+  model(s)" when `vision_filtered` is True.
+- `caption(path, model, system_prompt, user_text, max_megapixels)` →
+  `POST /v1/chat/completions`, image inline as a base64 `data:` URI via
+  `encode_image_data_uri()`: downscaled (LANCZOS) to the megapixel budget
+  (default 1 MP; `<= 0` = original). An image already in budget and in
+  png/jpg/webp is sent byte-for-byte; otherwise re-encoded as JPEG q95, or PNG
+  when it has transparency (converted to RGB/RGBA *before* resizing — Pillow
+  resizes palette images nearest-neighbour).
+- `unload_model(id)` — best-effort, returns False on no endpoint / any error:
+  Unsloth `POST /v1/unload {"model_path"}`, LM Studio
+  `POST /api/v1/models/unload {"instance_id"}` (0.4.0+), Ollama
+  `POST /api/generate {"model", "keep_alive": 0}`, llama.cpp
+  `POST /models/unload {"model"}` (router mode only); vLLM / generic: none.
 
-`LMStudioCaptioner` (in `caption_tab.py`) implements the standard
+The Settings tab **Test** button runs `detect_flavor(refresh=True)` +
+`list_models()`; the Caption tab **Refresh** button also re-detects, so
+switching apps behind the same URL is picked up without a restart.
+
+`LocalServerCaptioner` (in `caption_tab.py`) implements the standard
 `caption(path) -> list[str]` captioner interface:
-- **System prompt** and **Append current caption** switch are persisted at
-  `caption/lmstudio_system_prompt`, `caption/lmstudio_append`,
-  `caption/lmstudio_model`.
+- Settings persisted at `caption/local_server_model`,
+  `caption/local_server_system_prompt`, `caption/local_server_append`,
+  `caption/local_server_max_mp`, `caption/local_server_unload`, and the
+  system-prompt box height `caption/local_server_prompt_height` (set by the
+  `HeightResizeGrip` drag bar under the box, default 120 px). The old
+  `lmstudio_url` / `caption/lmstudio_*` keys are moved to the new names once by
+  `settings.migrate_settings()` (called from `create_application()`). The
+  Auto-Caption combo is persisted by **index**, so the rename kept the entry.
+- Model list auto-populates on the first on-demand switch to Local server —
+  never during startup restore (gated by `_lm_autorefresh_enabled`), so a down
+  server can't block launch.
 - "Append current caption" = send the image's current `.txt` content to the
   model as context (it does **not** append to the output).
 - `strip_thinking()` removes `<think>…</think>` reasoning blocks from the reply.
 - The result is split on the tag separator and **replaces** the existing
   caption: the captioner sets `replaces_caption = True`, which `CaptionTab`
   reads into `_caption_replace` so `_merge_tags` overwrites instead of honoring
-  the WD-tagger Position combo.
+  the WD-tagger Position combo. Splitting keeps `image.tags` a fixed point of
+  the caption box's split-then-join, which `_commit_caption_edit()`'s
+  "did the user edit?" check relies on — a captioner that stores a multi-line
+  reply as one tag would need that check to compare text instead.
 - After the batch, `CaptionWorker` calls the captioner's optional `finalize()`
-  hook (in the worker thread, so no UI stall). `LMStudioCaptioner.finalize()`
-  unloads the model via `LMStudioClient.unload_model()` →
-  `POST /api/v1/models/unload` `{"instance_id": <model>}` (LM Studio 0.4.0+ v1
-  API) to free VRAM. Best-effort: silently no-ops on older builds / 404 /
-  connection errors. WD and ComfyUI captioners have no `finalize`, so the hook
-  is skipped for them.
+  hook (in the worker thread, so no UI stall); `LocalServerCaptioner.finalize()`
+  unloads the model when **Unload model after batch** is checked (default on).
+  WD and ComfyUI captioners have no `finalize`, so the hook is skipped for them.
