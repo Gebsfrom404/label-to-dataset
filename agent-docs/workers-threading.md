@@ -49,6 +49,15 @@ Originally gated behind a `BATCH_SIZE = 100` counter (cleanup only every 100th i
 
 ModificationWorker calls `module.unload()` (if it exists) in a `finally` block after processing. This is optional — not part of the ABC — but allows modules to free GPU memory after batch work.
 
+## Transparency Around Modification Modules
+
+ModificationWorker wraps every `module.run()` with `ltd/utils/alpha_utils.py`:
+
+- `strip_transparency(source) → (path, alpha)` — fully opaque images (and anything without an alpha channel) pass through as `(source, None)`, so JPEG runs are untouched. Otherwise the RGB under `alpha == 0` pixels is replaced by the nearest opaque colour (`cv2.distanceTransformWithLabels`, `DIST_LABEL_PIXEL` — labels number the opaque pixels in raster order from 1) and saved to the `alpha_input` temp dir as `{stem}.png`, alpha kept. The stem is preserved because modules name their outputs after it.
+- `restore_transparency(output, alpha) → path` — re-attaches the source alpha when the output has none. An output that carries its own alpha (background-removal workflow) is left alone; a resized output gets the alpha resized; an output whose aspect ratio changed by more than 2% (crop/pad) is left alone. Non-PNG outputs are replaced by a same-stem `.png`, so the emitted path can differ from what `run()` returned.
+
+Why: see "Transparent PNGs Came Back With Junk" in gotchas-decisions.md.
+
 ## Extras _ScriptWorker
 
 The Extras tab has its own lightweight worker (`_ScriptWorker`) that doesn't extend `BaseWorker`. It takes a `run_func` and `params` dict, calls `run_func(params, progress_callback)` in a thread. The progress callback signature: `(current: int, total: int, message: str = '')`.

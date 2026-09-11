@@ -21,6 +21,9 @@ Model file: `models/lama/big-lama.pt` (user downloads separately).
 
 Mask dilation controlled by `mask_grow` setting (default 5px).
 
+Reads the image with `IMREAD_COLOR` and writes RGB — transparency is handled
+outside the module by `ModificationWorker` (see workers-threading.md).
+
 `edge_step` setting (default 0px, `lama_inpaint/edge_step`) zeroes the mask
 within N px of the image border. Applied *after* the 1536px downscale, so the
 margin is measured in the pixels LaMa actually sees. Use it when a mask touches

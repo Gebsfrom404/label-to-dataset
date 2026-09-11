@@ -3,6 +3,7 @@
 from PySide6.QtCore import Signal
 
 from ltd.data.image_item import ImageItem
+from ltd.utils.alpha_utils import restore_transparency, strip_transparency
 from ltd.workers.base_worker import BaseWorker
 
 
@@ -39,7 +40,12 @@ class ModificationWorker(BaseWorker):
                         continue
 
                     mask = image.mask_path if self.use_mask else None
-                    output_path = self.module.run(source, mask)
+                    # Modules work in RGB: hide the junk under transparent
+                    # pixels from them, then put the alpha back on the result.
+                    run_path, alpha = strip_transparency(source)
+                    output_path = self.module.run(run_path, mask)
+                    if alpha is not None:
+                        output_path = restore_transparency(output_path, alpha)
                     self.modification_complete.emit(i, str(output_path))
                 except Exception as e:
                     msg = f'{image.filename}: {e}'

@@ -129,6 +129,29 @@ The delete does **not** notify the Label tab, so its list still shows the (now m
 
 Fixed by `_record_offscreen()` (lazy, path-only entries materialized on switch) — see "Off-screen entries" in data-formats-storage.md. The same change dropped `_single_mode`: "Run Current" wrote its result to `model.get_image(self._current_image_index)`, i.e. to whatever image the user had navigated to while the run was in flight, instead of the one that was actually processed.
 
+## Transparent PNGs Came Back With Junk
+
+**Symptom:** "Remove with big-lama" or a ComfyUI workflow on a PNG with a
+transparent background returned the image with the transparent area filled
+with noise/garbage.
+
+**Cause:** both modules are RGB-only. LaMa reads with `cv_imread`'s default
+`IMREAD_COLOR` and writes a 3-channel PNG; ComfyUI's `LoadImage` does
+`convert('RGB')` (alpha only feeds its MASK output) and `SaveImage` writes RGB.
+The colour stored under `alpha == 0` pixels is undefined — editors leave junk
+there — so dropping alpha made it visible, and LaMa also inpainted *from* it.
+
+**Fix:** `ModificationWorker` wraps `run()` with `strip_transparency` /
+`restore_transparency` (`ltd/utils/alpha_utils.py`): bleed nearest opaque
+colours into transparent pixels before, re-attach the source alpha after. Done
+in the worker rather than per module so every current and future module is
+covered. On a synthetic sprite with random noise under its transparent area,
+LaMa's fill of the masked opaque pixels deviated 6.7/255 from the true colour
+before, 3.4 after, and the output alpha is bit-identical to the source.
+
+**Known limit:** alpha is restored, not inpainted — removing an object that
+was opaque over a transparent area leaves an opaque blob of fill colour there.
+
 ## ModificationWorker — Module Unload
 
 After batch modification completes (or is cancelled), the worker calls `module.unload()` if it exists. This allows modules to free GPU memory (e.g., LaMa model). The `unload()` method is optional — not part of the ABC.

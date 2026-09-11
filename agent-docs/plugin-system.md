@@ -13,7 +13,7 @@ Two base classes:
 
 **`BaseModificationModule`** — for image modification (LaMa inpaint, ComfyUI)
 - Same pattern: `name`, `get_settings_widget()`, `prepare()`
-- `run(image_path, mask_path, **kwargs) → Path` → returns path to modified image
+- `run(image_path, mask_path, **kwargs) → Path` → returns path to modified image. Modules may treat the image as RGB: for a source with transparency, `ModificationWorker` passes a temp copy (same stem) whose transparent pixels hold clean colours, and re-attaches the alpha to the result — see "Transparency Around Modification Modules" in workers-threading.md. Return an output with its own alpha channel to opt out.
 - `wants_mask() → bool` (default `True`) → queried by the Modify tab **after** `prepare()`. Return `False` when the module ignores masks for the current configuration (e.g. a ComfyUI workflow with no `LTD_Input_Mask` node); the tab then passes `mask_path=None` and includes maskless images in the run. See comfyui-integration.md for the full matrix.
 
 ## Discovery (`modules/__init__.py`)
