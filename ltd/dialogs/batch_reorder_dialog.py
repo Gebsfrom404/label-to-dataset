@@ -1,5 +1,6 @@
 """Batch reorder tags dialog (adapted from taggui)."""
 import random
+import re
 
 from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFrame,
                                QHBoxLayout, QLabel, QLineEdit, QPushButton,
@@ -14,6 +15,7 @@ class BatchReorderDialog(QDialog):
         self._tag_frequencies = tag_frequencies
         self.operation: str | None = None
         self.move_to_front_tags: list[str] = []
+        self.move_to_front_regex: re.Pattern | None = None
         self.keep_first: bool = False
 
         layout = QVBoxLayout(self)
@@ -50,7 +52,8 @@ class BatchReorderDialog(QDialog):
         layout.addWidget(line)
 
         # Move tags to front
-        layout.addWidget(QLabel('Move tags to front (comma-separated):'))
+        self.move_label = QLabel('Move tags to front (comma-separated):')
+        layout.addWidget(self.move_label)
         move_layout = QHBoxLayout()
         self.move_input = QLineEdit()
         self.move_input.setPlaceholderText('tag1, tag2, tag3')
@@ -59,6 +62,17 @@ class BatchReorderDialog(QDialog):
         self.move_btn.setEnabled(False)
         move_layout.addWidget(self.move_btn)
         layout.addLayout(move_layout)
+
+        self.move_regex_cb = QCheckBox('Use regex')
+        self.move_regex_cb.setToolTip(
+            'Treat the text as a single case-insensitive regular expression '
+            'instead of a comma-separated tag list. Matching tags keep their '
+            'existing relative order.')
+        layout.addWidget(self.move_regex_cb)
+
+        self.move_error_label = QLabel('')
+        self.move_error_label.setWordWrap(True)
+        layout.addWidget(self.move_error_label)
 
         layout.addSpacing(8)
 
@@ -73,16 +87,51 @@ class BatchReorderDialog(QDialog):
         self.reverse_btn.clicked.connect(lambda: self._do('reverse'))
         self.shuffle_btn.clicked.connect(lambda: self._do('shuffle'))
         self.move_btn.clicked.connect(lambda: self._do('move_to_front'))
-        self.move_input.textChanged.connect(
-            lambda t: self.move_btn.setEnabled(bool(t.strip())))
+        self.move_input.textChanged.connect(self._update_move_button)
+        self.move_regex_cb.toggled.connect(self._on_move_regex_toggled)
+
+    def _on_move_regex_toggled(self, checked: bool):
+        if checked:
+            self.move_label.setText('Move tags to front (regex pattern):')
+            self.move_input.setPlaceholderText('^(1girl|solo)$')
+        else:
+            self.move_label.setText('Move tags to front (comma-separated):')
+            self.move_input.setPlaceholderText('tag1, tag2, tag3')
+        self._update_move_button()
+
+    def _update_move_button(self):
+        text = self.move_input.text().strip()
+        if not text:
+            self.move_btn.setEnabled(False)
+            self.move_error_label.clear()
+            return
+        if self.move_regex_cb.isChecked():
+            try:
+                re.compile(text)
+            except re.error as e:
+                self.move_btn.setEnabled(False)
+                self.move_error_label.setText(f'Invalid regex: {e}')
+                return
+        self.move_btn.setEnabled(True)
+        self.move_error_label.clear()
 
     def _do(self, operation: str):
         self.operation = operation
         self.keep_first = self.keep_first_cb.isChecked()
         if operation == 'move_to_front':
             raw = self.move_input.text()
-            self.move_to_front_tags = [
-                t.strip() for t in raw.split(',') if t.strip()]
+            if self.move_regex_cb.isChecked():
+                self.move_to_front_tags = []
+                try:
+                    self.move_to_front_regex = re.compile(
+                        raw.strip(), re.IGNORECASE)
+                except re.error as e:
+                    self.move_error_label.setText(f'Invalid regex: {e}')
+                    return
+            else:
+                self.move_to_front_regex = None
+                self.move_to_front_tags = [
+                    t.strip() for t in raw.split(',') if t.strip()]
         self.accept()
 
     def reorder_tags(self, tags: list[str]) -> list[str]:
@@ -105,14 +154,16 @@ class BatchReorderDialog(QDialog):
         elif self.operation == 'shuffle':
             random.shuffle(work)
         elif self.operation == 'move_to_front':
-            front = []
-            rest = []
-            front_set = set(self.move_to_front_tags)
-            # Maintain the order specified by user
-            for t in self.move_to_front_tags:
-                if t in [w for w in work]:
-                    front.append(t)
-            rest = [t for t in work if t not in front_set]
+            if self.move_to_front_regex is not None:
+                # Matching tags keep their existing relative order
+                rx = self.move_to_front_regex
+                front = [t for t in work if rx.search(t)]
+                rest = [t for t in work if not rx.search(t)]
+            else:
+                front_set = set(self.move_to_front_tags)
+                # Maintain the order specified by user
+                front = [t for t in self.move_to_front_tags if t in work]
+                rest = [t for t in work if t not in front_set]
             work = front + rest
 
         if first is not None:
